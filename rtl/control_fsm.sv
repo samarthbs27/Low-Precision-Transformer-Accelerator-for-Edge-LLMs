@@ -45,9 +45,14 @@ module control_fsm #(
 );
 
     // ── Derived widths ──────────────────────────────────────
-    localparam int K_W    = $clog2(K);          // width for k_idx counter
-    localparam int TILE_W = $clog2(N/T);        // width for tile_idx counter
-    localparam int LAT_W  = $clog2(LOAD_LAT+1); // width for latency counter (safe for any LOAD_LAT)
+    localparam int K_W    = $clog2(K);           // width for k_idx counter
+    localparam int TILE_W = $clog2(N/T);         // width for tile_idx counter
+    localparam int LAT_W  = $clog2(LOAD_LAT+1);  // width for latency counter (safe for any LOAD_LAT)
+
+    // ── Comparison constants (plain values — type constrains width) ──
+    localparam logic [K_W-1:0]    K_MAX    = K - 1;
+    localparam logic [TILE_W-1:0] TILE_MAX = N/T - 1;
+    localparam logic [LAT_W-1:0]  LAT_INIT = LOAD_LAT - 1;
 
     // ── State type ──────────────────────────────────────────
     typedef enum logic [2:0] {
@@ -77,8 +82,9 @@ module control_fsm #(
         unique case (state)
             IDLE:    if (start)        next_state = LOAD;
             LOAD:    if (lat_cnt == 0) next_state = COMPUTE;
-            COMPUTE: if (k_idx == K_W'(K-1)) next_state = WRITE;
-            WRITE:   next_state = (tile_idx == TILE_W'(N/T-1)) ? DONE : LOAD;
+            COMPUTE: if (k_idx == K_MAX)    next_state = WRITE;
+            WRITE:   if (tile_idx == TILE_MAX) next_state = DONE;
+                     else                      next_state = LOAD;
             DONE:    next_state = IDLE;
             default: next_state = IDLE;
         endcase
@@ -114,20 +120,21 @@ module control_fsm #(
                 IDLE: begin
                     k_idx    <= '0;
                     tile_idx <= '0;
-                    if (start) begin
-                        clear_acc <= 1'b1;               // 1-cycle pulse, resets accumulators
-                        lat_cnt   <= LAT_W'(LOAD_LAT-1); // prime latency counter
-                    end
+                    if (start)
+                        lat_cnt <= LAT_INIT; // prime latency counter
                 end
 
                 // ── LOAD ──────────────────────────────────
                 // Present BRAM addresses; wait for read latency
+                // clear_acc fires first cycle of LOAD (before COMPUTE)
                 // mac_valid stays LOW — data not yet valid
                 LOAD: begin
                     x_bram_en <= 1'b1;
                     w_bram_en <= 1'b1;
                     x_rd_addr <= k_idx;
                     w_rd_addr <= k_idx;
+                    if (lat_cnt == LAT_INIT)
+                        clear_acc <= 1'b1;   // 1-cycle pulse, resets accumulators
                     if (lat_cnt != '0)
                         lat_cnt <= lat_cnt - 1'b1;
                 end
@@ -140,7 +147,7 @@ module control_fsm #(
                     mac_valid <= 1'b1;
                     x_rd_addr <= k_idx;
                     w_rd_addr <= k_idx;
-                    k_idx     <= (k_idx == K_W'(K-1)) ? '0 : k_idx + 1'b1;
+                    k_idx     <= (k_idx == K_MAX) ? '0 : k_idx + 1'b1;
                 end
 
                 // ── WRITE ─────────────────────────────────
@@ -148,12 +155,11 @@ module control_fsm #(
                 WRITE: begin
                     wr_en   <= 1'b1;
                     wr_addr <= tile_idx;
-                    if (tile_idx == TILE_W'(N/T-1)) begin
+                    if (tile_idx == TILE_MAX) begin
                         // last tile — DONE next, leave tile_idx as-is
                     end else begin
-                        tile_idx  <= tile_idx + 1'b1;
-                        clear_acc <= 1'b1;               // 1-cycle pulse before next COMPUTE
-                        lat_cnt   <= LAT_W'(LOAD_LAT-1);
+                        tile_idx <= tile_idx + 1'b1;
+                        lat_cnt  <= LAT_INIT; // clear_acc fires in first LOAD cycle
                     end
                 end
 

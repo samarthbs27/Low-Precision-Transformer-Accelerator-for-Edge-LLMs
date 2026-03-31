@@ -43,11 +43,14 @@ module tb_control_fsm;
     initial clk = 0;
     always #5 clk = ~clk;
 
-    // ── Counters ─────────────────────────────────────────────
-    int mac_valid_count;
-    int clear_acc_count;
-    int wr_en_count;
-    int cycle_count;
+    // ── Pulse counters (always blocks — reliable, never miss a pulse) ──
+    int mac_valid_count = 0;
+    int clear_acc_count = 0;
+    int wr_en_count     = 0;
+
+    always @(posedge clk) if (mac_valid) mac_valid_count++;
+    always @(posedge clk) if (clear_acc) clear_acc_count++;
+    always @(posedge clk) if (wr_en)     wr_en_count++;
 
     // ── Tasks ────────────────────────────────────────────────
     task apply_reset();
@@ -68,22 +71,18 @@ module tb_control_fsm;
         $dumpfile("tb_control_fsm.vcd");
         $dumpvars(0, tb_control_fsm);
 
-        mac_valid_count = 0;
-        clear_acc_count = 0;
-        wr_en_count     = 0;
-        cycle_count     = 0;
-
         apply_reset();
 
         // ── Check 1: mac_valid LOW in IDLE before start ──────
         @(posedge clk);
-        assert (!mac_valid)
-            else $error("FAIL check 1: mac_valid HIGH in IDLE before start");
-        $display("PASS check 1: mac_valid LOW in IDLE");
+        if (!mac_valid)
+            $display("PASS check 1: mac_valid LOW in IDLE");
+        else
+            $error("FAIL check 1: mac_valid HIGH in IDLE before start");
 
         pulse_start();
 
-        // ── Run until done, monitoring each cycle ────────────
+        // ── Run until done ────────────────────────────────────
         fork
             // watchdog
             begin
@@ -93,68 +92,68 @@ module tb_control_fsm;
 
             // monitor loop
             begin
+                int cycle_count = 0;
+                int exp_wr_addr = 0;
+
                 while (!done) begin
                     @(posedge clk);
                     cycle_count++;
 
-                    if (mac_valid) mac_valid_count++;
-                    if (clear_acc) clear_acc_count++;
-
                     // ── Check 2: mac_valid LOW during WRITE ──
+                    if (wr_en && mac_valid)
+                        $error("FAIL check 2: mac_valid HIGH during WRITE (tile %0d)",
+                               wr_en_count - 1);
+
+                    // ── Check 5: wr_addr correct ─────────────
                     if (wr_en) begin
-                        assert (!mac_valid)
-                            else $error("FAIL check 2: mac_valid HIGH during WRITE (tile %0d)",
-                                        wr_en_count);
-
-                        // ── Check 5: wr_addr correct ─────────
-                        assert (wr_addr == wr_en_count)
-                            else $error("FAIL check 5: wr_addr=%0d expected %0d",
-                                        wr_addr, wr_en_count);
-                        $display("PASS check 5: tile %0d wr_addr=%0d", wr_en_count, wr_addr);
-
-                        wr_en_count++;
-                    end
-
-                    // ── Check 2: mac_valid LOW during LOAD ───
-                    // LOAD = x_bram_en HIGH, mac_valid LOW, wr_en LOW
-                    if (x_bram_en && !mac_valid && !wr_en) begin
-                        assert (!mac_valid)
-                            else $error("FAIL check 2: mac_valid HIGH during LOAD");
+                        if (wr_addr == exp_wr_addr)
+                            $display("PASS check 5: tile %0d wr_addr=%0d",
+                                     exp_wr_addr, wr_addr);
+                        else
+                            $error("FAIL check 5: wr_addr=%0d expected %0d",
+                                   wr_addr, exp_wr_addr);
+                        exp_wr_addr++;
                     end
                 end
+
+                // ── Check 3: clear_acc count ──────────────────
+                // One extra cycle for always block to sample last clear_acc
+                @(posedge clk);
+                if (clear_acc_count == NUM_TILES)
+                    $display("PASS check 3: clear_acc pulsed %0d times", clear_acc_count);
+                else
+                    $error("FAIL check 3: clear_acc pulsed %0d times (expected %0d)",
+                           clear_acc_count, NUM_TILES);
+
+                // ── Check 4: wr_en count ──────────────────────
+                if (wr_en_count == NUM_TILES)
+                    $display("PASS check 4: wr_en pulsed %0d times", wr_en_count);
+                else
+                    $error("FAIL check 4: wr_en pulsed %0d times (expected %0d)",
+                           wr_en_count, NUM_TILES);
+
+                // ── Check 1b: mac_valid total cycles ─────────
+                if (mac_valid_count == NUM_TILES * K)
+                    $display("PASS check 1b: mac_valid asserted %0d cycles", mac_valid_count);
+                else
+                    $error("FAIL check 1b: mac_valid asserted %0d cycles (expected %0d)",
+                           mac_valid_count, NUM_TILES * K);
+
+                // ── Check 6: done asserted ────────────────────
+                $display("PASS check 6: done asserted after %0d cycles", cycle_count);
+
+                // ── Check 7: done de-asserts ──────────────────
+                @(posedge clk);
+                if (!done)
+                    $display("PASS check 7: done de-asserted, FSM back to IDLE");
+                else
+                    $error("FAIL check 7: done still HIGH — FSM did not return to IDLE");
+
+                $display("--- All checks complete ---");
+                $finish;
             end
         join_any
         disable fork;
-
-        // ── Check 3: clear_acc count ─────────────────────────
-        assert (clear_acc_count == NUM_TILES)
-            else $error("FAIL check 3: clear_acc pulsed %0d times (expected %0d)",
-                        clear_acc_count, NUM_TILES);
-        $display("PASS check 3: clear_acc pulsed %0d times", clear_acc_count);
-
-        // ── Check 4: wr_en count ─────────────────────────────
-        assert (wr_en_count == NUM_TILES)
-            else $error("FAIL check 4: wr_en pulsed %0d times (expected %0d)",
-                        wr_en_count, NUM_TILES);
-        $display("PASS check 4: wr_en pulsed %0d times", wr_en_count);
-
-        // ── Check 1b: mac_valid total cycles ─────────────────
-        assert (mac_valid_count == NUM_TILES * K)
-            else $error("FAIL check 1b: mac_valid asserted %0d cycles (expected %0d)",
-                        mac_valid_count, NUM_TILES * K);
-        $display("PASS check 1b: mac_valid asserted %0d cycles", mac_valid_count);
-
-        // ── Check 6: done asserted ───────────────────────────
-        $display("PASS check 6: done asserted after %0d cycles", cycle_count);
-
-        // ── Check 7: done de-asserts next cycle ──────────────
-        @(posedge clk);
-        assert (!done)
-            else $error("FAIL check 7: done still HIGH — FSM did not return to IDLE");
-        $display("PASS check 7: done de-asserted, FSM back to IDLE");
-
-        $display("--- All checks complete ---");
-        $finish;
     end
 
 endmodule

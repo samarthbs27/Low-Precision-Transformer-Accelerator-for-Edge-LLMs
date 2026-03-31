@@ -37,8 +37,8 @@ This is implemented as a high-performance dot-product / matrix multiplication en
 | Person | Role |
 |---|---|
 | **Satyarth** | Model, Quantization & Ground Truth — `model.py`, test data |
-| **Rijul** | MAC Unit & Parallel Compute Core — `mac_unit.v`, `mac_array.v` |
-| **Samarth** | Dataflow, Tiling & Control — `control_fsm.v`, BRAM interface |
+| **Rijul** | MAC Unit & Parallel Compute Core — `mac_unit.sv`, `mac_array.sv` |
+| **Samarth** | Dataflow, Tiling & Control — `control_fsm.sv`, BRAM interface |
 | **Om** | U55C Integration & Host Interface — host program, PCIe kernel |
 
 ---
@@ -53,8 +53,8 @@ Project/
     Milestone2.pdf           ← milestone specification
     Milestone2.png           ← system architecture diagram
   rtl/
-    control_fsm.v            ← (WIP) tiling FSM and dataflow control
-    tb_control_fsm.v         ← (WIP) FSM testbench
+    control_fsm.sv           ← tiling FSM and dataflow control
+    tb_control_fsm.sv        ← FSM testbench
 ```
 
 ---
@@ -71,7 +71,7 @@ For full details — signal tables, FSM state diagram, tiling strategy, and cycl
 
 ### Week 1 — Foundations
 - Python FFN model + INT8 quantized test data (Satyarth)
-- MAC unit + 8-lane MAC array in Verilog (Rijul)
+- MAC unit + 8-lane MAC array in SystemVerilog (Rijul)
 - Block diagram, FSM design, tiling plan (Samarth)
 - U55C environment setup + host communication (Om)
 
