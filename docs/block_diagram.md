@@ -10,13 +10,19 @@
 ```mermaid
 stateDiagram-v2
     [*] --> IDLE
-    IDLE --> LOAD      : start=1\n(init k_idx=0, tile_idx=0)
-    LOAD --> COMPUTE   : BRAM read latency done\n(1-2 cycles)
-    COMPUTE --> COMPUTE : k_idx < K-1\n(k_idx++)
-    COMPUTE --> LOAD   : k_idx == K-1\nAND tile_idx < N/T-1\n(tile_idx++, clear_acc, k_idx=0)
-    COMPUTE --> DONE   : k_idx == K-1\nAND tile_idx == N/T-1
+    IDLE --> LOAD      : start=1\n(init k_idx=0, tile_idx=0\nclear_acc=1 for 1 cycle)
+    LOAD --> COMPUTE   : BRAM read latency elapsed\n(1-2 cycles, mac_valid=LOW)
+    COMPUTE --> COMPUTE : k_idx < K-1\n(k_idx++, mac_valid=HIGH)
+    COMPUTE --> WRITE  : k_idx == K-1\n(mac_valid=LOW, wr_en=1)
+    WRITE --> LOAD     : tile_idx < N/T-1\n(tile_idx++, clear_acc=1 for 1 cycle\nk_idx=0)
+    WRITE --> DONE     : tile_idx == N/T-1
     DONE --> IDLE      : done acknowledged
 ```
+
+> **Timing notes:**
+> - `mac_valid` is HIGH **only** during COMPUTE. It is LOW during LOAD, WRITE, and DONE.
+> - `clear_acc` is asserted for **exactly 1 cycle** at the start of IDLE→LOAD and WRITE→LOAD transitions, before COMPUTE begins.
+> - LOAD state holds for 1–2 cycles to absorb BRAM read latency before `mac_valid` goes high.
 
 ---
 
@@ -50,10 +56,28 @@ Each cycle during COMPUTE, the FSM provides an address and the BRAM outputs one 
 Stores one **tile** of weight matrix W at a time — 8 rows × K columns = 512 INT8 values.
 Each row maps to one MAC lane. After each tile finishes, the next 8 rows are loaded.
 
+> **BRAM Banking (critical):** A standard single-port BRAM cannot supply 8 independent reads per cycle.
+> The weight memory must be implemented as **8 separate BRAM banks — one per lane**.
+> Each bank stores one row of the tile: lane `j` reads from its own bank at address `k_idx`.
+> Option B (later): use a wide BRAM (64-bit) and pack all 8 weights into a single read.
+
+**Within-tile address (current):**
+```
+rd_addr[j] = j * K + k_idx        (lane j reads its own row at column k)
+```
+
+**Full address if all weights are pre-loaded (future / reference):**
+```
+rd_addr[j] = (tile_idx * T * K) + (j * K) + k_idx
+           = tile_idx * 512 + j * 64 + k_idx      (for T=8, K=64)
+```
+> The current design reloads the BRAM each tile, so only `j * K + k_idx` is needed in hardware.
+> The full formula matters if weights are ever pre-loaded globally (e.g., Phase 2 double buffering).
+
 | Direction | Signal | Width | Description |
 |---|---|---|---|
-| IN ← FSM | `tile_idx + k_idx` (rd_addr) | 10b | Read address. Encodes both which tile (row group) and which column (k step). |
-| OUT → MAC Array | `W[j,k] × 8 lanes` | 8×8b INT8 | One weight value per lane, all read in parallel each cycle. |
+| IN ← FSM | `k_idx` (rd_addr per bank) | 7b | Column index into the current tile. Each bank uses the same `k_idx`; lane `j` reads from bank `j`. |
+| OUT → MAC Array | `W[j,k] × 8 lanes` | 8×8b INT8 | One weight value per lane, read in parallel from 8 separate banks each cycle. |
 
 ---
 
@@ -64,10 +88,11 @@ The brain of the accelerator. Runs a two-level loop and generates every control 
 |---|---|---|---|
 | IN ← Host | `start` | 1 | Triggers computation. FSM leaves IDLE state. |
 | OUT → Input BRAM | `k_idx` | 7b | Inner loop counter, 0→K-1. Acts as the BRAM read address for x. |
-| OUT → Weight BRAM | `tile_idx + k_idx` | 10b | Combined address: selects correct weight row and column each cycle. |
-| OUT → MAC Array | `mac_valid` | 1 | High every COMPUTE cycle. Tells MAC array to accumulate this cycle's inputs. Low during LOAD. |
-| OUT → Accumulators | `clear_acc` | 1 | Pulsed high once at the start of each new tile. Resets all 8 INT32 regs to 0. |
-| OUT → Host | `done` | 1 | Asserted after the last tile completes. Signals host to read results. |
+| OUT → Weight BRAM | `k_idx` | 7b | Column index into the current tile. Each of the 8 BRAM banks uses this same address; lane j reads from bank j at `k_idx`. |
+| OUT → MAC Array | `mac_valid` | 1 | **HIGH only during COMPUTE state.** LOW during LOAD, WRITE, and DONE. MAC must not accumulate unless this is high. |
+| OUT → Accumulators | `clear_acc` | 1 | Pulsed HIGH for **exactly 1 cycle** before COMPUTE begins (on IDLE→LOAD and WRITE→LOAD transitions). Resets all 8 INT32 regs to 0. |
+| OUT → Output Buffer | `wr_en` | 1 | Asserted for 1 cycle in the WRITE state (immediately after k_idx == K-1). Triggers write of acc[0..7] into the output buffer at the correct slot. |
+| OUT → Host | `done` | 1 | Asserted after the last tile's WRITE state completes. Signals host to read results. |
 
 ---
 
@@ -101,9 +126,14 @@ They are **not** reset between k steps — only cleared at tile boundaries via `
 After each tile, 8 values are written into the correct slot range (`tile_idx×8` to `tile_idx×8+7`).
 After all 8 tiles, the buffer holds the complete result vector.
 
+> **Write timing:** The write occurs in the dedicated **WRITE state**, exactly 1 cycle after `k_idx == K-1`.
+> The FSM asserts `wr_en=1` and drives the write address `tile_idx * T` for 1 cycle, then transitions to LOAD (or DONE).
+
 | Direction | Signal | Width | Description |
 |---|---|---|---|
-| IN ← Accumulators | `tile results` | 8×32b INT32 | Filled 8 slots at a time after each tile's K loop completes. |
+| IN ← Accumulators | `tile results` | 8×32b INT32 | The 8 final accumulator values captured at the end of the K loop. |
+| IN ← FSM | `wr_en` | 1 | Write enable. Asserted for exactly 1 cycle in WRITE state. |
+| IN ← FSM | `wr_addr` | 4b | Write address = `tile_idx`. Selects which group of 8 output slots to write into (`tile_idx * 8 .. tile_idx * 8 + 7`). |
 | OUT → Host | `results (PCIe)` | 64×32b INT32 | Full output vector y transferred back to the host after `done` is asserted. |
 
 ---
@@ -129,6 +159,7 @@ For each tile (tile_idx = 0 .. 7):
 
 Total MAC operations = N × K = 64 × 64 = 4096
 Per tile             = 8 lanes × 64 k-steps = 512 MACs in 64 cycles
+Total cycles         ≈ K × (N/T) = 64 × 8 = 512 cycles  (excluding LOAD latency per tile)
 ```
 
 ---
@@ -140,10 +171,14 @@ Input Vector BRAM  (x):
   Depth = 64,  Width = 8 bits
   Address 0..63  →  x[0]..x[63]
 
-Weight Tile BRAM  (one tile at a time):
-  Depth = 8 × 64 = 512,  Width = 8 bits
-  Address = lane*K + k   →  W[tile_idx*8 + lane, k]
+Weight Tile BRAM  (8 banks, one per lane):
+  Per bank: Depth = K = 64,  Width = 8 bits
+  Bank j stores row j of the current tile: W[tile_idx*8 + j, 0..K-1]
+  All banks share the same read address: k_idx
   Reloaded from host/DDR for each new tile
+
+  Within-tile address:   rd_addr[j] = k_idx                (used in hardware)
+  Full global address:   rd_addr[j] = tile_idx*T*K + j*K + k_idx  (reference only)
 
 Output Buffer:
   Depth = 64,  Width = 32 bits
@@ -155,31 +190,44 @@ Output Buffer:
 ## One Full Cycle of Operation
 
 ```
-1. Host loads x, W1 into BRAMs
-2. Host asserts start=1
+1.  Host loads x into Input Vector BRAM
+    Host loads W[tile 0] into 8 Weight BRAM banks (one row per bank)
+    Host asserts start=1
 
-3. FSM: IDLE → LOAD
-   - k_idx = 0, tile_idx = 0
-   - clear_acc = 1  (zero the 8 accumulators)
+2.  FSM: IDLE → LOAD
+    - k_idx = 0, tile_idx = 0
+    - clear_acc = 1 for exactly 1 cycle  (zero all 8 accumulators)
+    - mac_valid = LOW
 
-4. FSM: LOAD → COMPUTE  (after 1-2 cycle BRAM read latency)
+3.  FSM: LOAD  (hold 1–2 cycles for BRAM read latency)
+    - BRAM addresses presented, data not yet valid
+    - mac_valid = LOW  (MAC must not accumulate during latency)
 
-5. For tile_idx = 0 to 7:
-     For k_idx = 0 to 63:
-       - Input BRAM outputs x[k_idx]            → broadcast to all 8 lanes
-       - Weight BRAM outputs W[j, k_idx] × 8    → one per lane
-       - mac_valid = 1
-       - All 8 lanes accumulate: acc[j] += W[j,k] * x[k]
-       - k_idx++
+4.  FSM: LOAD → COMPUTE  (data now valid on BRAM outputs)
 
-     - Write acc[0..7] to OutputBuffer[tile_idx*8 .. tile_idx*8+7]
-     - clear_acc = 1
-     - tile_idx++
-     - FSM: COMPUTE → LOAD (next tile)
+5.  For tile_idx = 0 to 7:
 
-6. After tile_idx == 7, k_idx == 63:
-   - FSM: COMPUTE → DONE
-   - done = 1
+      For k_idx = 0 to 63:
+        - Input BRAM[k_idx]     → x[k]        (broadcast to all 8 lanes)
+        - Weight Bank j[k_idx]  → W[j,k]      (one per lane, 8 banks in parallel)
+        - mac_valid = HIGH
+        - All 8 lanes: acc[j] += W[j,k] * x[k]
+        - k_idx++
 
-7. Host reads 64 × INT32 results from Output Buffer over PCIe
+      k_idx == K-1: FSM → WRITE state
+        - mac_valid = LOW
+        - wr_en = 1  (exactly 1 cycle)
+        - wr_addr = tile_idx
+        - acc[0..7] written to OutputBuffer[tile_idx*8 .. tile_idx*8+7]
+
+      If tile_idx < 7:  FSM → LOAD (next tile)
+        - Host reloads Weight BRAMs with next tile's rows
+        - clear_acc = 1 for exactly 1 cycle
+        - k_idx = 0, tile_idx++
+
+6.  After tile_idx == 7 WRITE completes:
+    - FSM → DONE
+    - done = 1
+
+7.  Host reads 64 × INT32 results from Output Buffer over PCIe
 ```
