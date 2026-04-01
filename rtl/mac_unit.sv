@@ -24,11 +24,12 @@ module mac_unit (
     output logic signed [31:0] acc_out   // INT32 updated accumulator
 );
 
-    logic signed [15:0] product;
+    // Use 32-bit intermediate so Icarus doesn't need bit-select inside always_comb
+    logic signed [31:0] product;
 
     always_comb begin
-        product  = 16'(signed'(a)) * 16'(signed'(b)); // INT8 × INT8 → INT16
-        acc_out  = acc_in + 32'(signed'(product));     // sign-extend → INT32, add
+        product = $signed(a) * $signed(b);   // INT8 × INT8, result widened to 32-bit signed
+        acc_out = acc_in + product;
     end
 
 endmodule

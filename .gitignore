@@ -8,5 +8,7 @@ docs/block_diagram.drawio
 docs/fpga_team_roles.txt
 
 # Simulation outputs
+sim/*.vvp
+sim/*.vcd
 sim.vvp
 tb_control_fsm.vcd

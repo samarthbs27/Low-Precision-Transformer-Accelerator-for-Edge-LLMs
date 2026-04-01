@@ -37,8 +37,9 @@ module control_fsm #(
     output logic                     clear_acc,  // HIGH for exactly 1 cycle before COMPUTE
 
     // ── Output Buffer control ──────────────────────────────
-    output logic [$clog2(N/T)-1:0]  wr_addr,    // = tile_idx
-    output logic                     wr_en,      // HIGH for exactly 1 cycle in WRITE
+    output logic [$clog2(N/T)-1:0]  wr_addr,      // = tile_idx
+    output logic                     wr_en,        // HIGH for exactly 1 cycle in WRITE
+    output logic [$clog2(N/T)-1:0]  tile_idx_out, // current tile for weight bank selection in top
 
     // ── Host interface (→ Om) ──────────────────────────────
     output logic                     done
@@ -174,5 +175,8 @@ module control_fsm #(
             endcase
         end
     end
+
+    // ── Expose tile_idx for top-level weight BRAM addressing ──────────────
+    assign tile_idx_out = tile_idx;
 
 endmodule

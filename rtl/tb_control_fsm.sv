@@ -34,6 +34,7 @@ module tb_control_fsm;
     logic                    clear_acc;
     logic [$clog2(N/T)-1:0]  wr_addr;
     logic                    wr_en;
+    logic [$clog2(N/T)-1:0]  tile_idx_out;
     logic                    done;
 
     // ── Instantiate DUT ─────────────────────────────────────

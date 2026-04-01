@@ -40,8 +40,8 @@ module mac_array #(
     input  logic signed [7:0]  w_in [LANES-1:0], // w_in[j] = W[tile*T+j, k]
 
     // ── Output buffer interface ───────────────────────────
-    output logic signed [31:0] output_data [N-1:0], // full N-element result vector
-    output logic               valid_out             // HIGH for 1 cycle when tile written
+    output logic [N-1:0][31:0] output_data,  // full N-element result vector (packed for Icarus)
+    output logic               valid_out     // HIGH for 1 cycle when tile written
 );
 
     // ── Accumulator registers: one INT32 per lane ─────────
