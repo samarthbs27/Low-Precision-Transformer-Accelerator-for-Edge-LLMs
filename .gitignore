@@ -6,9 +6,9 @@ docs/Milestone2.docx
 docs/array_architecture.txt
 docs/block_diagram.drawio
 docs/fpga_team_roles.txt
+docs/meeting_notes.txt
+docs/Milestone3_Progress_Report.docx
 
 # Simulation outputs
 sim/*.vvp
 sim/*.vcd
-sim.vvp
-tb_control_fsm.vcd

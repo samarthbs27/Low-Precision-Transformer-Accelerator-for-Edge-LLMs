@@ -1,6 +1,6 @@
 # Docs
 
-Design documentation for the Low-Precision Transformer Accelerator.
+Design documentation for the FPGA Transformer Decoder Accelerator.
 
 ---
 
@@ -8,23 +8,24 @@ Design documentation for the Low-Precision Transformer Accelerator.
 
 | File | Description |
 |------|-------------|
-| `block_diagram.md` | Full written documentation: FSM state diagram, per-block signal tables, tiling strategy, memory layout, and a step-by-step cycle trace |
-| `block_diagram.png` | Exported PNG of the block diagram |
-| `Milestone2.pdf` / `.png` | Project milestone spec sheet |
+| `block_diagram.md` | GEMM engine detail: FSM state diagram, per-block signal tables, tiling strategy, memory layout, cycle trace |
+| `block_diagram.png` | Exported PNG of the GEMM engine block diagram |
+| `block_diagram.png` | Exported PNG of the full transformer decoder layer |
+| `theory.md` | Theory behind the hardware: transformer decoder layer math, INT8 quantization, tiling, output-stationary dataflow, full pipeline diagram |
+| `ClassProject_RC19_Milestone3.pdf` | Milestone 3 specification sheet |
+| `Milestone2.pdf` / `.png` | Milestone 2 specification sheet |
 
 ---
 
-## Key Document: `block_diagram.md`
+## Key Documents
 
-The main reference for understanding the hardware design. Contains:
+### `block_diagram.png`
+The main architecture reference. Shows the complete on-chip transformer decoder layer pipeline:
+QKV projections → attention scores → softmax → weighted sum → W_O projection → residual add → layer norm → FFN → activation → FFN2 → residual add → layer norm 2.
+Color-coded by block type (green = shared MAC array, red = dedicated new hardware, orange = shared compute resources).
 
-- **FSM state diagram** — `IDLE → LOAD → COMPUTE → WRITE → DONE` with transition conditions and timing notes
-- **Per-block signal tables** — every signal into and out of each block (name, width, description)
-- **Tiling strategy** — pseudocode for the two-level loop (8 tiles × 64 cycles = 512 MAC cycles)
-- **Memory layout** — Input BRAM, Weight BRAM (8 banks), Output Buffer addressing
-- **Full cycle trace** — numbered step-by-step walkthrough of one complete run
+### `theory.md`
+Explains what the hardware computes and why it is designed the way it is. Covers the full decoder layer math, INT8 quantization, the tiling loop, output-stationary dataflow, and how the four team members' work fits together.
 
-## Viewing the Block Diagram
-
-`block_diagram.png` is linked from the project root `README.md` and shows the full system architecture.  
-For signal-level detail, refer to `block_diagram.md`.
+### `block_diagram.md`
+Low-level reference for the GEMM compute engine (the shared MAC array core). Contains signal tables, FSM transitions, BRAM addressing formulas, and a cycle-by-cycle trace. Still accurate — the GEMM engine is unchanged; it is now time-multiplexed across all linear ops in the decoder layer.

@@ -1,22 +1,27 @@
-# Low-Precision FPGA Transformer Accelerator
+# FPGA Transformer Decoder Accelerator
 
-> A hardware accelerator for Transformer FFN computation using a parallel INT8 MAC array on the Xilinx Alveo U55C.
+> An on-chip INT8 accelerator for a full transformer decoder layer on the Xilinx Alveo U55C — QKV projections, scaled dot-product attention, FFN, softmax, layer norm, and residual connections, all running on FPGA fabric.
 
 ---
 
 ## Project Overview
 
-We are building a **low-precision hardware accelerator for Transformer-based inference** on an FPGA.
+We are building an **on-chip transformer decoder layer accelerator** in INT8 on an FPGA. The full decoder layer pipeline runs end-to-end on the FPGA between token input and layer output — no PCIe round-trips mid-inference.
 
-**Core computation:**
+**Decoder layer pipeline:**
 ```
-y = W2 * ReLU(W1 * x)
+Input X → Q/K/V Projections → Attention Scores (Q×Kᵀ/√d_k) → Softmax
+        → Weighted Sum (×V) → Output Projection (×W_O)
+        → Residual Add #1 → Layer Norm 1
+        → FFN Layer 1 → Activation → FFN Layer 2
+        → Residual Add #2 → Layer Norm 2 → Output
 ```
 
-This is implemented as a high-performance dot-product / matrix multiplication engine using:
-- INT8 weights and activations
-- INT32 accumulation
-- 8-lane parallel MAC array (output-stationary)
+**Two categories of hardware:**
+- **Shared MAC array** — time-multiplexed across every matrix multiply step (Q, K, V, attention scores, weighted sum, W_O, FFN1, FFN2)
+- **Dedicated blocks** — softmax unit, activation unit, two layer norms, two residual adders
+
+All compute uses INT8 weights and activations with INT32 accumulation.
 
 ---
 
@@ -25,10 +30,11 @@ This is implemented as a high-performance dot-product / matrix multiplication en
 | Property | Value |
 |---|---|
 | FPGA Board | Xilinx Alveo U55C (PCIe accelerator) |
-| Host Interface | PCIe via XRT |
-| Target Dimensions | N=64, K=64 (TinyLlama-derived) |
-| Compute Core | 1D Parallel MAC Array |
-| Precision | INT8 × INT8 → INT32 |
+| Host Interface | PCIe via XRT (x86 host) |
+| Architecture | On-chip accelerator — full decoder layer on FPGA fabric |
+| Compute Core | 8-lane parallel MAC array, output-stationary, time-multiplexed |
+| Precision | INT8 × INT8 → INT32 accumulation |
+| Test Dimensions | N=64, K=64 |
 
 ---
 
@@ -36,10 +42,10 @@ This is implemented as a high-performance dot-product / matrix multiplication en
 
 | Person | Role |
 |---|---|
-| **Satyarth** | Model, Quantization & Ground Truth — `model.py`, test data |
-| **Rijul** | MAC Unit & Parallel Compute Core — `mac_unit.sv`, `mac_array.sv` |
-| **Samarth** | Dataflow, Tiling & Control — `control_fsm.sv`, BRAM interface |
-| **Om** | U55C Integration & Host Interface — host program, PCIe kernel |
+| **Satyarth** | Model, Quantization & Ground Truth — `model/model.py`, INT8 test vectors |
+| **Rijul** | MAC Array & Dedicated Hardware — `mac_unit.sv`, `mac_array.sv`, softmax, activation, layer norm |
+| **Samarth** | Dataflow, Tiling & Control — `control_fsm.sv`, `top.sv`, BRAM interface, residual adders |
+| **Om** | U55C Integration & Host Interface — XRT kernel, PCIe host program |
 
 ---
 
@@ -47,63 +53,81 @@ This is implemented as a high-performance dot-product / matrix multiplication en
 
 ```
 Project/
-  README.md                  ← this file
+  README.md
   docs/
-    block_diagram.md         ← system block diagram explanation with signal tables
-    Milestone2.pdf           ← milestone specification
-    Milestone2.png           ← system architecture diagram
+    block_diagram.md               ← GEMM engine: signal tables, FSM diagram, tiling
+    block_diagram.png              ← exported full transformer decoder layer diagram
+    theory.md                      ← transformer theory, INT8 quantization, tiling explained
+    Milestone2.pdf / .png          ← milestone 2 specification
+    Milestone3_Progress_Report.docx← milestone 3 progress report
   rtl/
-    control_fsm.sv           ← tiling FSM and dataflow control
-    tb_control_fsm.sv        ← FSM testbench
+    control_fsm.sv                 ← 5-state tiling FSM (IDLE→LOAD→COMPUTE→WRITE→DONE)
+    tb_control_fsm.sv              ← FSM testbench (7 checks, all passing)
+    top.sv                         ← top-level integration: FSM + MAC array + BRAM stubs
+    tb_top.sv                      ← integration testbench (4 checks, all passing)
+    mac_unit.sv                    ← Rijul: combinational INT8×INT8→INT32 MAC unit
+    mac_array.sv                   ← Rijul: 8-lane parallel MAC array with accumulators
+    tb_mac_array.sv                ← Rijul: testbench (7 checks, all passing) ✅
+    README.md                      ← module descriptions and simulation commands
+  model/
+    model.py                       ← Satyarth: FFN reference model + INT8 quantization
+    gen_test_vectors.py            ← Satyarth: generates sim/x.txt, w.txt, expected.txt
+  sim/
+    x.txt / w.txt / expected.txt   ← test vectors for tb_mac_array (K=64, N=64)
+    test_k16/ test_k64/            ← full FFN reference outputs
 ```
 
 ---
 
 ## System Architecture
 
-![Block Diagram](docs/block_diagram.png)
+![Full Transformer Decoder Layer](docs/block_diagram.png)
 
-For full details — signal tables, FSM state diagram, tiling strategy, and cycle trace — see [docs/block_diagram.md](docs/block_diagram.md).
+Full pipeline — signal tables, FSM state diagram, tiling strategy, and per-block descriptions: [docs/block_diagram.md](docs/block_diagram.md)
 
 ---
 
 ## 4-Week Execution Plan
 
-### Week 1 — Foundations
-- Python FFN model + INT8 quantized test data (Satyarth)
-- MAC unit + 8-lane MAC array in SystemVerilog (Rijul)
+### Week 1 — Foundations ✅
+- INT8 quantized model + test data (Satyarth)
+- MAC unit + 8-lane array in SystemVerilog (Rijul)
 - Block diagram, FSM design, tiling plan (Samarth)
-- U55C environment setup + host communication (Om)
+- U55C environment setup (Om)
 
-### Week 2 — FPGA Compute Integration
-- MAC array integrated with control FSM
-- Tiled matrix multiplication in simulation
-- BRAM buffers for inputs and weights
+### Week 2 — FPGA Compute Core ✅
+- MAC array integrated with control FSM (`top.sv`)
+- Tiled matrix-vector multiplication verified in simulation
+- BRAM stubs for input, weight, and output buffers
 
-### Week 3 — Memory & Performance
-- Tiled weight streaming
-- Double buffering (ping-pong BRAM)
-- Performance measurement and resource utilization
+### Week 3 — Transformer Pipeline
+- Softmax unit in hardware (Rijul)
+- Activation unit — GELU/ReLU (Rijul)
+- Layer norm units ×2 (Rijul)
+- Residual adder units ×2 (Samarth)
+- Attention dataflow scheduler on host (Samarth)
+- Double-buffered weight streaming from HBM (Samarth)
+- XRT kernel integration (Om)
 
-### Week 4 — Optimization & Finalization
-- Performance comparison vs CPU
-- Bottleneck analysis
-- Final demo and report
+### Week 4 — Integration & Evaluation
+- End-to-end decoder layer simulation with real test vectors
+- PCIe host-to-FPGA data pipeline
+- CPU baseline (C++) for speedup comparison
+- Performance measurement: latency, throughput, resource utilization
 
 ---
 
 ## Success Criteria
 
-- Working INT8 MAC array on FPGA
-- Host → FPGA → Host data pipeline
-- Accelerated linear layer execution
-- Measured speedup vs CPU baseline
+- Full transformer decoder layer executing on FPGA fabric
+- All operations (linear + nonlinear) verified in simulation
+- Host → FPGA → Host data pipeline via PCIe/XRT
+- Measured latency and throughput vs CPU baseline
 
 ---
 
-## Key Constraints
+## Scope
 
-- **Not** implementing full TinyLlama — it is used only as a reference for dimensions
-- **Not** implementing sparsity, attention, or KV cache (Phase 1)
-- **Not** using a 2D systolic array — 1D parallel MAC array is the chosen architecture
-- 4-week hard deadline: prioritize a working vertical slice over completeness
+**In scope:** Single transformer decoder layer — QKV projections, scaled dot-product attention, softmax, FFN with activation, residual connections, layer normalization.
+
+**Out of scope:** Multi-layer transformer, KV cache, multi-head attention, INT4 weights, 2D systolic array, full model inference.

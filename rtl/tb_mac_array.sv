@@ -44,7 +44,7 @@ module tb_mac_array;
     logic signed [7:0]  x_in;
     logic signed [7:0]  w_in [LANES-1:0];
 
-    logic signed [31:0] output_data [N-1:0];
+    logic [N-1:0][31:0] output_data;
     logic               valid_out;
 
     // ── Isolated mac_unit signals ─────────────────────────
@@ -145,7 +145,7 @@ module tb_mac_array;
         if (!fd) $fatal(1, "Cannot open sim/x.txt — run gen_test_vectors.py first");
         for (int i = 0; i < K; i++) begin
             int tmp;
-            void'($fscanf(fd, "%d\n", tmp));
+            $fscanf(fd, "%d\n", tmp);
             x_vec[i] = tmp[7:0];
         end
         $fclose(fd);
@@ -155,7 +155,7 @@ module tb_mac_array;
         for (int i = 0; i < N; i++)
             for (int j = 0; j < K; j++) begin
                 int tmp;
-                void'($fscanf(fd, "%d\n", tmp));
+                $fscanf(fd, "%d\n", tmp);
                 w_mat[i][j] = tmp[7:0];
             end
         $fclose(fd);
@@ -164,7 +164,7 @@ module tb_mac_array;
         if (!fd) $fatal(1, "Cannot open sim/expected.txt");
         for (int i = 0; i < N; i++) begin
             int tmp;
-            void'($fscanf(fd, "%d\n", tmp));
+            $fscanf(fd, "%d\n", tmp);
             expected[i] = tmp;
         end
         $fclose(fd);
@@ -177,7 +177,6 @@ module tb_mac_array;
         // ── CHECK_1: mac_unit isolated ────────────────────
         $display("\n-- CHECK_1: mac_unit isolated --");
         begin
-            typedef struct { shortint a, b, acc; int exp; string label; } tc_t;
             // Drive combinational inputs directly
             mu_acc_in = '0;
 

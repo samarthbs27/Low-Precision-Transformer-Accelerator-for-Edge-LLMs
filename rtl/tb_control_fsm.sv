@@ -69,7 +69,7 @@ module tb_control_fsm;
 
     // ── Main test ────────────────────────────────────────────
     initial begin
-        $dumpfile("tb_control_fsm.vcd");
+        $dumpfile("sim/tb_control_fsm.vcd");
         $dumpvars(0, tb_control_fsm);
 
         apply_reset();
