@@ -3,6 +3,221 @@
 
 > Visual diagram: open `block_diagram.drawio` with the Draw.io Integration VS Code extension.
 
+> **Scope note (2026-04-06):** This document covers two levels:
+> - **Section 1 (GEMM Engine)** — the shared MAC array and its tiling FSM. This is fully implemented and verified.
+> - **Section 2 (Full Transformer Pipeline)** — signal tables and dataflow for the complete on-chip decoder layer. Conservative design decisions are recorded in `docs/design_decisions.txt`.
+
+---
+
+## Section 2 — Full Transformer Decoder Layer Pipeline
+
+### Pipeline Overview
+
+```
+Host CPU (x86)
+     |  PCIe / XRT
+     v
+FPGA Boundary
+     |
+     +-- Input Buffer (x: d_model x 1, INT8) ---------------+
+     |                                                        |
+     |   [GEMM 1: Q Projection]  x * WQ  → Q (d_k x 1)     |
+     |   [GEMM 2: K Projection]  x * WK  → K (d_k x 1)     |
+     |   [GEMM 3: V Projection]  x * WV  → V (d_v x 1)     |
+     |                                                        |
+     |   [Attention Score]       Q·K / sqrt(d_k) → scalar   |
+     |   [Softmax]               softmax(score) → weight     |
+     |   [Weighted Sum]          weight × V → attn_out       |
+     |                                                        |
+     |   [GEMM 4: W_O Proj]     attn_out * WO → proj_out    |
+     |   [Residual Add 1]        x + proj_out → r1           |
+     |   [Layer Norm 1]          LayerNorm(r1) → ln1_out     |
+     |                                                        |
+     |   [GEMM 5: FFN W1]       ln1_out * W1 → h (d_ff x 1)|
+     |   [Activation]            ReLU(h) → h_act             |
+     |   [GEMM 6: FFN W2]       h_act * W2 → ffn_out        |
+     |   [Residual Add 2]        ln1_out + ffn_out → r2      |
+     |   [Layer Norm 2]          LayerNorm(r2) → output      |
+     |                                                        |
+     +-- Output Buffer (y: d_model x 1, INT8) ---------------+
+     |
+     v  PCIe / XRT
+Host CPU
+```
+
+**Conservative assumptions (see design_decisions.txt for full rationale):**
+- `seq_len = 1` (single token — autoregressive decode)
+- `d_model = 64`, `d_ff = 256`, single attention head
+- All GEMM inputs are INT8; all GEMM outputs are INT32
+- INT32 → INT8 re-quantization (static scales) between GEMM output and next GEMM input
+- Host-side pipeline sequencer (Option A): host issues `start` per GEMM step and loads buffers between steps
+
+---
+
+### Pipeline Step Signal Tables
+
+Conservative decisions applied: INT32 outputs from MAC array, INT8 inputs to each GEMM.
+`done` is the existing FSM output. `start` is the existing FSM input. Shared MAC array
+is re-invoked for each GEMM step with different weights loaded into Weight BRAM.
+
+---
+
+#### Input Buffer  *(Host → FPGA)*
+
+| Direction | Signal | Width | Description |
+|---|---|---|---|
+| IN ← Host (PCIe) | `wr_en` | 1 | Write enable from XRT kernel |
+| IN ← Host (PCIe) | `wr_addr` | 7b | Byte address into input buffer |
+| IN ← Host (PCIe) | `wr_data` | 8b INT8 | Input token embedding x[0..d_model-1] |
+| OUT → Shared MAC Array | `x[k]` | 8b INT8 | Broadcast to all 8 MAC lanes during COMPUTE |
+
+---
+
+#### Shared MAC Array + Control FSM  *(Samarth + Rijul)*
+
+Re-invoked for each of the 8 GEMM steps. Host loads the correct weight tile into
+Weight BRAM and asserts `start` before each invocation.
+
+| Direction | Signal | Width | Description |
+|---|---|---|---|
+| IN ← Host | `start` | 1 | Begin GEMM. FSM leaves IDLE. |
+| IN ← Input Buffer | `x[k]` | 8b INT8 | Current input element, broadcast to all 8 lanes |
+| IN ← Weight BRAM | `W[j,k] × 8` | 8×8b INT8 | One weight per lane per cycle |
+| OUT → MAC lanes | `mac_valid` | 1 | HIGH only during COMPUTE state |
+| OUT → Accumulators | `clear_acc` | 1 | Pulse 1 cycle before each tile COMPUTE |
+| OUT → Output Buffer | `wr_en` | 1 | 1-cycle pulse in WRITE state per tile |
+| OUT → Output Buffer | `wr_addr` | 4b | Tile index (0..7), selects output slot group |
+| OUT → Host | `done` | 1 | 1-cycle pulse after all tiles complete |
+
+---
+
+#### Intermediate Output Buffer  *(between GEMM steps)*
+
+One shared INT32 result buffer (64 × 32b). Re-used across GEMM steps; host or
+requantize block reads from it before the next GEMM begins.
+
+| Direction | Signal | Width | Description |
+|---|---|---|---|
+| IN ← MAC Array | `tile_results` | 8×32b INT32 | 8 accumulator values written per tile |
+| IN ← FSM | `wr_en` | 1 | Write enable (1 cycle per tile) |
+| IN ← FSM | `wr_addr` | 4b | Tile index for write slot selection |
+| OUT → Requantize / Dedicated Block | `y[i]` | 32b INT32 | Full result vector after `done` |
+
+---
+
+#### Re-quantize Block  *(between GEMM output and next GEMM input — Rijul or Samarth)*
+
+Converts INT32 GEMM output to INT8 for the next stage's input BRAM.
+Scale values loaded by host before pipeline start.
+
+| Direction | Signal | Width | Description |
+|---|---|---|---|
+| IN ← Output Buffer | `y_int32[i]` | 32b INT32 | Raw accumulator output |
+| IN ← Scale Register | `scale` | 32b FP32 | Per-tensor quantization scale (offline) |
+| OUT → Input Buffer (next step) | `y_int8[i]` | 8b INT8 | Clipped/rounded INT8 output |
+
+*Operation: `y_int8 = clamp(round(y_int32 / scale), -128, 127)`*
+
+---
+
+#### Softmax Unit  *(Rijul)*
+
+For `seq_len=1`, softmax of a single score is 1.0 — this block is a passthrough
+in Phase 1. Signal table designed for Phase 2 multi-token support.
+
+| Direction | Signal | Width | Description |
+|---|---|---|---|
+| IN ← Attention Score Buffer | `scores[i]` | 32b INT32 | Raw attention scores Q·Kᵀ/√d_k |
+| IN ← Control | `start` | 1 | Begin softmax computation |
+| OUT → Weighted Sum | `weights[i]` | 8b INT8 | Normalized attention weights (INT8) |
+| OUT → Control | `done` | 1 | Softmax complete |
+
+*Phase 1 (seq_len=1): `weights[0] = 1.0` → output = INT8 max (127), bypass multiply.*
+
+---
+
+#### Activation Unit  *(Rijul)*
+
+Applied to FFN hidden layer (after GEMM 5 / W1 projection).
+
+| Direction | Signal | Width | Description |
+|---|---|---|---|
+| IN ← Output Buffer | `h[i]` | 32b INT32 | Pre-activation hidden vector (d_ff × 1) |
+| IN ← Control | `start` | 1 | Begin activation |
+| OUT → Input Buffer (W2 step) | `h_act[i]` | 8b INT8 | ReLU(h), re-quantized to INT8 |
+| OUT → Control | `done` | 1 | Activation complete |
+
+*ReLU: `h_act[i] = (h[i] > 0) ? requantize(h[i]) : 0`*
+
+---
+
+#### Residual Adder ×2  *(Samarth)*
+
+Two instances: after attention W_O projection (Add 1), after FFN W2 projection (Add 2).
+Inputs are INT32 (zero-extended from INT8), output is INT32 before re-quantization.
+
+| Direction | Signal | Width | Description |
+|---|---|---|---|
+| IN ← Buffer A | `a[i]` | 32b INT32 | First operand (e.g., original input x) |
+| IN ← Buffer B | `b[i]` | 32b INT32 | Second operand (e.g., GEMM projection output) |
+| IN ← Control | `start` | 1 | Begin element-wise add |
+| IN ← Control | `n` | 7b | Number of elements (d_model = 64) |
+| OUT → Output Buffer | `sum[i]` | 32b INT32 | a[i] + b[i], then re-quantize to INT8 |
+| OUT → Control | `done` | 1 | Add complete |
+
+---
+
+#### Layer Norm ×2  *(Rijul)*
+
+Two instances: after Residual Add 1 (LN1), after Residual Add 2 (LN2).
+Internal FP32 arithmetic; outputs INT8 for next GEMM input.
+
+| Direction | Signal | Width | Description |
+|---|---|---|---|
+| IN ← Residual Add Output | `x[i]` | 32b INT32 | Input vector to normalize (d_model × 1) |
+| IN ← Parameter BRAM | `gamma[i]` | 32b FP32 | Per-element scale parameter |
+| IN ← Parameter BRAM | `beta[i]` | 32b FP32 | Per-element shift parameter |
+| IN ← Control | `start` | 1 | Begin layer norm |
+| OUT → Input Buffer (next step) | `ln_out[i]` | 8b INT8 | Normalized, scaled, shifted, re-quantized |
+| OUT → Control | `done` | 1 | Layer norm complete |
+
+*Internal: `ln_out[i] = requantize(gamma[i] * (x[i] - mean) / sqrt(var + eps) + beta[i])`*
+
+---
+
+### Host-Side Pipeline Sequencer (Option A — Phase 1)
+
+The host issues one `start` pulse per GEMM step and one trigger per dedicated block.
+Between steps, the host loads the next weight tile and routes buffer pointers.
+
+```
+Host loop (pseudocode):
+  load_bram(WQ); start_gemm(); wait_done()  → Q in output_buf
+  requantize(Q) → input_buf
+  load_bram(WK); start_gemm(); wait_done()  → K in output_buf
+  requantize(K) → input_buf
+  load_bram(WV); start_gemm(); wait_done()  → V in output_buf
+  requantize(V) → input_buf
+  start_attention_score(Q, K); wait_done()  → score
+  start_softmax(score); wait_done()         → weight (=1.0 for seq_len=1)
+  weighted_sum(weight, V) → attn_out        → passthrough for seq_len=1
+  load_bram(WO); start_gemm(); wait_done()  → proj_out
+  start_residual_add(x, proj_out); done()   → r1
+  start_layer_norm(r1, LN1_params); done()  → ln1_out
+  load_bram(W1); start_gemm(); wait_done()  → h (d_ff x 1)
+  start_activation(h); done()              → h_act
+  load_bram(W2); start_gemm(); wait_done()  → ffn_out
+  start_residual_add(ln1_out, ffn_out); done() → r2
+  start_layer_norm(r2, LN2_params); done()  → output
+  dma_to_host(output)
+```
+
+---
+
+## Section 1 — GEMM Engine (Shared MAC Array)
+
+*(Fully implemented and verified. See control_fsm.sv, mac_array.sv, top.sv.)*
+
 ---
 
 ## FSM State Diagram

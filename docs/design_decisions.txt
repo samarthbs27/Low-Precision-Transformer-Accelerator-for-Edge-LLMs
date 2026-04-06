@@ -1,0 +1,225 @@
+DESIGN DECISIONS — FPGA Transformer Decoder Accelerator
+=========================================================
+Last updated: 2026-04-06
+Author: Samarth (Dataflow, Tiling, Control)
+
+This file tracks all conservative decisions made to unblock RTL/documentation work,
+and all open decisions that still require team discussion or have been resolved.
+
+---
+
+SECTION A — CONSERVATIVE DECISIONS (made now, may be revisited in Phase 2)
+============================================================================
+
+A1. Sequence length = 1 (single token)
+  Rationale: Autoregressive decode generates one token at a time. For seq_len=1
+  the QKV projections collapse to matrix-vector multiply (same as our existing GEMM
+  engine). The attention score Q*Kt is a dot-product of length d_k, and softmax of
+  a single score is trivially 1.0 (passthrough). This eliminates the attention
+  sequence buffer and simplifies the softmax block significantly.
+  Impact: All GEMM steps remain Nx1 (matrix-vector, not matrix-matrix). No KV cache
+  needed for single-token demo. Lift this restriction in Phase 2 for sequence batches.
+
+A2. Single attention head
+  Rationale: Multi-head attention requires splitting Q/K/V into h heads, running h
+  parallel attention sub-operations, then concatenating. For Phase 1 we treat the
+  full d_model as a single head (h=1). The MAC array is time-multiplexed across heads
+  in Phase 2 if needed.
+  Impact: Q, K, V projections each produce one d_model vector. No head-splitting logic.
+
+A3. Model dimensions: d_model=64, d_ff=256, seq_len=1
+  Rationale: Matches Satyarth's test vectors (N=64, K=64 for QKV; K=64 → N=256 for
+  FFN1; K=256 → N=64 for FFN2). Small enough to simulate end-to-end in Icarus.
+  Impact: All GEMM calls use these dimensions. Weight BRAMs sized accordingly.
+
+A4. Inter-block data format: INT32 internal, INT8 at GEMM inputs
+  Rationale: The MAC array accumulates in INT32. Dedicated blocks (softmax, layer norm,
+  activation) receive INT32 from the output buffer and produce INT8 for the next GEMM
+  input. This avoids precision loss inside the compute path while keeping GEMM inputs
+  at INT8 to use the full throughput of the INT8 MAC array.
+  Impact: Output buffer is INT32 (64 x 32b). Re-quantization block needed between
+  each GEMM output and the next GEMM input. Conservative choice: re-quantize using
+  host-provided static scales (offline calibration by Satyarth).
+
+A5. Re-quantization: static per-tensor scales, host-provided
+  Rationale: Dynamic quantization requires runtime max/min computation, adding hardware
+  and latency. Static scales computed offline (Satyarth's model.py) are simpler and
+  sufficient for a fixed demonstration model.
+  Impact: Host loads scale values into a small register file on FPGA before start.
+  Re-quantization block performs: INT8_out = clamp(round(INT32_in / scale), -128, 127).
+  Owner: Rijul (requantize unit) or can be embedded in softmax/layer norm.
+
+A6. Host-side pipeline sequencer (Option A — no on-chip sequencer FSM)
+  Rationale: Building a full on-chip sequencer FSM that chains all 8 GEMM steps and
+  6 dedicated blocks is a large Week 4 task. For Phase 1, the host (Om) issues start
+  pulses and switches buffer pointers between each GEMM invocation. The control_fsm.sv
+  remains a single-GEMM controller; the host sequences the full pipeline.
+  Impact: Each GEMM step requires a PCIe round-trip signal (start/done). Latency
+  includes host overhead per step. Acceptable for correctness demo; optimize in Phase 2
+  by moving sequencer on-chip.
+  Requires: Om to implement host-side sequencer loop.
+
+A7. Activation function: ReLU (not GELU)
+  Rationale: ReLU is a single comparator (output = max(0, x)), trivial in hardware.
+  GELU requires a polynomial approximation or LUT. Phase 1 uses ReLU for simplicity;
+  Rijul's activation unit can add GELU in Phase 2.
+  Impact: FFN activation is ReLU. Satyarth's model.py already uses ReLU.
+
+A8. Softmax: FP32 internal arithmetic
+  Rationale: Softmax requires exp() and division, which are not trivially INT8/INT32.
+  Use FP32 internally (Vivado Floating-Point IP or small LUT-based exp). For seq_len=1,
+  softmax(q) = 1.0 always, so Phase 1 softmax is a passthrough — this decision is
+  mainly load-bearing for Phase 2 multi-token support.
+  Impact: Rijul's softmax unit should accept INT32 attention scores and produce INT8
+  or FP32 output. For Phase 1 seq_len=1, it can be a wire (output = input / sum = 1.0).
+
+A9. Layer norm: FP32 internal, INT8 output
+  Rationale: Layer norm requires mean, variance, sqrt — not naturally INT8. FP32
+  internal computation (Vivado IP or soft-float) followed by requantization to INT8.
+  Impact: Rijul's layer norm block accepts INT32, computes in FP32 internally,
+  outputs INT8. Gamma/beta learnable parameters stored as FP32 or INT8 (TBD by Rijul).
+
+A10. Residual add: INT32 + INT32 → INT32, then requantize to INT8
+  Rationale: Adding INT8 directly risks overflow for large activations. Conservatively
+  perform the add in INT32 (zero-extend inputs from INT8 to INT32 before adding),
+  then clip/requantize the result to INT8 for the next GEMM.
+  Impact: Samarth's residual adder block: takes two INT32 vectors, outputs one INT32
+  vector. Re-quantization (A5) applied downstream.
+
+A11. Output buffer holds INT32 (no in-place requantization)
+  Rationale: The MAC array writes INT32 accumulators. Requantizing inside the write path
+  would require scale registers inside the FSM/top. Conservative: write raw INT32,
+  let the requantize block operate as a separate pipeline stage.
+  Impact: Output buffer is 64 x 32b = 2 Kbyte per GEMM output. Acceptable for BRAM
+  budget on U55C.
+
+A12. Single BRAM per buffer (no double buffering in Phase 1)
+  Rationale: Ping-pong (double buffering) allows overlapping weight streaming with
+  computation, but requires 2x BRAM and a more complex address controller. Phase 1
+  uses single buffers; double buffering is a Week 3 / Phase 2 addition.
+  Impact: Host must finish loading weights before issuing start. No weight streaming
+  concurrency. Samarth adds double buffering in Week 3 if time allows.
+
+---
+
+SECTION B — DECISIONS NEEDING TEAM DISCUSSION (open items)
+============================================================
+
+B1. Inter-block handshake protocol (Samarth + Om + Rijul)
+  Question: When the FSM asserts done, does the dedicated block (softmax, layer norm,
+  etc.) start automatically, or does the host need to issue a separate start signal?
+  Options:
+    (i)  Host polls done, then issues start to next block. Simplest, no on-chip
+         sequencer needed. Adds 1-2 PCIe round-trip latencies per step.
+    (ii) On-chip: FSM done signal daisy-chained to next block's start. Removes host
+         from the inner loop. More complex, requires a sequencer or chain of enables.
+  Recommendation: Option (i) for Phase 1, revisit in Week 4. Confirm with Om.
+  Blocking: rtl/top.sv signal routing, Om's host program.
+
+B2. Requantization block: who implements it and where does it live? (Rijul + Samarth)
+  Question: Is the requantize block a separate RTL module, or embedded inside each
+  dedicated block (e.g., layer norm outputs INT8 directly)?
+  Options:
+    (i)  Separate requantize.sv module instantiated between each GEMM output and the
+         next stage's input buffer. Clean separation of concerns.
+    (ii) Embedded inside softmax/layer norm/activation output path. Fewer modules but
+         less reusable.
+  Blocking: affects signal tables for softmax, layer norm, activation.
+
+B3. Attention scores for seq_len=1 (Samarth + Rijul)
+  Question: For seq_len=1, Q*Kt is a single dot-product (scalar). Do we invoke the
+  full MAC array for this, or is it a special-case no-op (result = Q·K / sqrt(d_k)
+  is a single scalar passed directly to softmax)?
+  Conservative default: Invoke MAC array with Q (d_k x 1) and K (d_k x 1) using a
+  single tile. Samarth confirms this is just another GEMM call.
+  Blocking: attention scheduler logic.
+
+B4. W_O projection dimensions (Samarth + Satyarth)
+  Question: After the attention weighted sum, the output is d_v x 1 = 64 x 1.
+  W_O is d_model x d_v = 64 x 64. Confirm: this is another standard GEMM call
+  (N=64, K=64, same as the existing engine). Satyarth to confirm dimensions.
+
+B5. FFN dimensions (Satyarth to confirm)
+  Question: d_ff = 4 * d_model = 256 for a standard transformer. Satyarth's model
+  uses d_ff=256 (K=64→N=256 for W1, K=256→N=64 for W2). Confirm these are final.
+  Impact: Weight BRAM must be sized for the largest GEMM (K=256 for W2 input side).
+  Currently control_fsm.sv is parameterized (N, K, T) so this requires re-invoking
+  with different parameters — handled by host sequencer (see B1).
+
+B6. Layer norm gamma/beta parameter storage (Rijul)
+  Question: Gamma and beta are per-element scale/shift vectors (64 x FP32 or INT8).
+  Where are they stored? Options: small BRAM, register file, hardcoded.
+  Blocking: Rijul's layer norm module interface.
+
+B7. Softmax output format (Rijul)
+  Question: After softmax, does the output go directly to the weighted-sum GEMM?
+  For seq_len=1, the weighted sum (attention_weights x V) is just V (since weight=1.0).
+  Does Rijul's softmax output INT8 (for MAC array) or FP32 (for a separate multiply)?
+  Conservative default: for seq_len=1, weighted sum input = V directly (bypass softmax
+  multiply). Rijul to confirm.
+
+B8. Double buffering weight interface with Om (Samarth + Om)
+  Question: When Phase 1 is working, Samarth will add ping-pong BRAMs for weight
+  streaming. What is the PCIe write interface? Does Om use AXI4 bursts or individual
+  register writes? This affects BRAM address generation in top.sv.
+  Blocking: Week 3 work. Confirm with Om before implementation.
+
+B9. Clock domain: single clock for entire FPGA design? (Om)
+  Question: Is the entire accelerator (FSM, MAC array, dedicated blocks, BRAM) clocked
+  from a single clock domain? Or does the PCIe interface use a separate clock?
+  Conservative default: single 200 MHz clock for all RTL blocks; PCIe clock domain
+  crossing handled by Om's XRT shell.
+  Blocking: Om to confirm clock plan.
+
+B10. INT32 output DMA: how are 64 x 32b results transferred to host? (Om)
+  Question: Does Om's XRT kernel DMA the full output buffer (2 KB per GEMM result)
+  to host memory in a single burst, or does host poll word-by-word?
+  Conservative default: single burst DMA after done assertion.
+  Blocking: Om's host program and kernel design.
+
+---
+
+SECTION C — IMPLEMENTED DESIGN DECISIONS (done, not up for discussion)
+=======================================================================
+
+C1. Output-stationary accumulation (Samarth + Rijul)
+  Each MAC lane holds its accumulator across the full K loop. Avoids writing
+  partial sums to memory. Accumulators cleared at tile boundary via clear_acc.
+  Status: IMPLEMENTED in control_fsm.sv + mac_array.sv. Verified in simulation.
+
+C2. Tile size T = 8 (= MAC array lanes)
+  One tile = 8 output elements computed simultaneously. For N=64: 8 tiles.
+  Status: IMPLEMENTED. All testbenches pass with T=8.
+
+C3. FSM states: IDLE → LOAD → COMPUTE → WRITE → (LOAD | DONE)
+  LOAD absorbs BRAM latency (LOAD_LAT=2 cycles). mac_valid LOW in LOAD/WRITE.
+  Status: IMPLEMENTED in control_fsm.sv. 7/7 testbench checks pass.
+
+C4. 8-lane parallel MAC array (Rijul)
+  INT8 x INT8 → INT32, 8 lanes in parallel. combinational mac_unit inside
+  registered mac_array.
+  Status: IMPLEMENTED. 7/7 testbench checks pass against Satyarth's test vectors.
+
+C5. Behavioral BRAM stubs in top.sv (Samarth)
+  Register arrays used as combinational BRAM models for simulation. FSM registered
+  address output provides one-cycle pipeline alignment.
+  Status: IMPLEMENTED in top.sv. 4/4 integration testbench checks pass.
+
+C6. Host-side write ports for preloading (Samarth)
+  top.sv exposes x_wr_en/addr/data and w_wr_en/row/col/data for testbench and
+  eventually Om's PCIe interface.
+  Status: IMPLEMENTED.
+
+C7. INT8 x INT8 arithmetic, INT32 accumulation
+  All weight and activation data is quantized to INT8 by Satyarth's model.py.
+  Accumulation in INT32 to avoid overflow.
+  Status: IMPLEMENTED and verified.
+
+C8. Static quantization scales (Satyarth)
+  model.py computes per-tensor scales offline. gen_test_vectors.py outputs
+  sim/x.txt, w.txt, expected.txt for hardware verification.
+  Status: IMPLEMENTED (Satyarth). Test vectors generated and verified.
+
+---
+
+END OF FILE
