@@ -12,9 +12,9 @@ We are building an **on-chip transformer decoder layer accelerator** in INT8 on 
 ```
 Input X → Q/K/V Projections → Attention Scores (Q×Kᵀ/√d_k) → Softmax
         → Weighted Sum (×V) → Output Projection (×W_O)
-        → Residual Add #1 → Layer Norm 1
-        → FFN Layer 1 → Activation → FFN Layer 2
-        → Residual Add #2 → Layer Norm 2 → Output
+        → Residual Add #1 → RMSNorm 1
+        → FFN: gate_proj ∥ up_proj → SiLU(gate) × up → down_proj
+        → Residual Add #2 → RMSNorm 2 → Output
 ```
 
 **Two categories of hardware:**
@@ -32,7 +32,7 @@ All compute uses INT8 weights and activations with INT32 accumulation.
 | FPGA Board | Xilinx Alveo U55C (PCIe accelerator) |
 | Host Interface | PCIe via XRT (x86 host) |
 | Architecture | On-chip accelerator — full decoder layer on FPGA fabric |
-| Compute Core | 8-lane parallel MAC array, output-stationary, time-multiplexed |
+| Compute Core | Parallel MAC array, output-stationary, time-multiplexed (8 lanes Phase 1; ~512 target) |
 | Precision | INT8 × INT8 → INT32 accumulation |
 | Test Dimensions | N=64, K=64 |
 
@@ -102,8 +102,9 @@ Full pipeline — signal tables, FSM state diagram, tiling strategy, and per-blo
 
 ### Week 3 — Transformer Pipeline
 - Softmax unit in hardware (Rijul)
-- Activation unit — GELU/ReLU (Rijul)
-- Layer norm units ×2 (Rijul)
+- SiLU activation + elementwise multiply for SwiGLU (Rijul)
+- RMSNorm units ×2 (Rijul)
+- RoPE unit for Q and K (Rijul)
 - Residual adder units ×2 (Samarth)
 - Attention dataflow scheduler on host (Samarth)
 - Double-buffered weight streaming from HBM (Samarth)
@@ -128,6 +129,6 @@ Full pipeline — signal tables, FSM state diagram, tiling strategy, and per-blo
 
 ## Scope
 
-**In scope:** Single transformer decoder layer — QKV projections, scaled dot-product attention, softmax, FFN with activation, residual connections, layer normalization.
+**In scope:** One TinyLlama decoder layer — QKV projections (GQA), RoPE, scaled dot-product attention, softmax, SwiGLU FFN (SiLU), residual connections, RMSNorm. Reused 22× by host loop.
 
-**Out of scope:** Multi-layer transformer, KV cache, multi-head attention, INT4 weights, 2D systolic array, full model inference.
+**Out of scope:** Multi-layer simultaneous execution, KV cache, multi-head in Phase 1 (single head for test), INT4 weights, 2D systolic array.

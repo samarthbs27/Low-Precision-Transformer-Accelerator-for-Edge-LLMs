@@ -4,7 +4,6 @@ CLAUDE.md
 # Docs — internal/working files
 docs/Milestone2.docx
 docs/array_architecture.txt
-docs/block_diagram.drawio
 docs/fpga_team_roles.txt
 docs/meeting_notes.txt
 docs/Milestone3_Progress_Report.docx
@@ -12,3 +11,10 @@ docs/Milestone3_Progress_Report.docx
 # Simulation outputs
 sim/*.vvp
 sim/*.vcd
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Large model weight archives (do not commit — download with --save-weights)
+model/data/

@@ -134,8 +134,8 @@ module tb_mac_array;
 
     // ── Main test ─────────────────────────────────────────
     initial begin
-        $dumpfile("sim/tb_mac_array.vcd");
-        $dumpvars(0, tb_mac_array);
+        // $dumpfile("sim/tb_mac_array.vcd");
+        // $dumpvars(0, tb_mac_array);
 
         errors          = 0;
         valid_out_count = 0;

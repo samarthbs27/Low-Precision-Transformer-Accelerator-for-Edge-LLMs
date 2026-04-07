@@ -27,10 +27,11 @@ A2. Single attention head
   in Phase 2 if needed.
   Impact: Q, K, V projections each produce one d_model vector. No head-splitting logic.
 
-A3. Model dimensions: d_model=64, d_ff=256, seq_len=1
-  Rationale: Matches Satyarth's test vectors (N=64, K=64 for QKV; K=64 → N=256 for
-  FFN1; K=256 → N=64 for FFN2). Small enough to simulate end-to-end in Icarus.
-  Impact: All GEMM calls use these dimensions. Weight BRAMs sized accordingly.
+A3. Model dimensions: d_model=64, d_ff=256, seq_len=1 (Phase 1 test only)
+  Rationale: Small enough to simulate end-to-end in Icarus Verilog.
+  TinyLlama target: d_model=2048, d_ff=5632, 32 Q heads / 4 KV heads (GQA).
+  Impact: Phase 1 test vectors use N=64, K=64. FSM is parameterised (N, K, T) so
+  scaling to TinyLlama dimensions only requires changing parameters and BRAM sizing.
 
 A4. Inter-block data format: INT32 internal, INT8 at GEMM inputs
   Rationale: The MAC array accumulates in INT32. Dedicated blocks (softmax, layer norm,
@@ -59,11 +60,14 @@ A6. Host-side pipeline sequencer (Option A — no on-chip sequencer FSM)
   by moving sequencer on-chip.
   Requires: Om to implement host-side sequencer loop.
 
-A7. Activation function: ReLU (not GELU)
-  Rationale: ReLU is a single comparator (output = max(0, x)), trivial in hardware.
-  GELU requires a polynomial approximation or LUT. Phase 1 uses ReLU for simplicity;
-  Rijul's activation unit can add GELU in Phase 2.
-  Impact: FFN activation is ReLU. Satyarth's model.py already uses ReLU.
+A7. Activation function: SiLU (required by TinyLlama SwiGLU MLP)
+  Rationale: TinyLlama uses SwiGLU, not a standard 2-layer FFN. The activation is
+  SiLU: silu(x) = x / (1 + exp(-x)). This is not a Phase 1 simplification that can
+  be deferred — it is a correctness requirement for TinyLlama inference.
+  SwiGLU structure: gate_proj and up_proj run in parallel; SiLU applied to gate;
+  result element-wise multiplied with up; then down_proj.
+  Impact: Rijul implements a SiLU unit (LUT-based exp) + elementwise multiply block.
+  This replaces the previously planned ReLU/GELU activation unit.
 
 A8. Softmax: FP32 internal arithmetic
   Rationale: Softmax requires exp() and division, which are not trivially INT8/INT32.
@@ -73,11 +77,12 @@ A8. Softmax: FP32 internal arithmetic
   Impact: Rijul's softmax unit should accept INT32 attention scores and produce INT8
   or FP32 output. For Phase 1 seq_len=1, it can be a wire (output = input / sum = 1.0).
 
-A9. Layer norm: FP32 internal, INT8 output
-  Rationale: Layer norm requires mean, variance, sqrt — not naturally INT8. FP32
-  internal computation (Vivado IP or soft-float) followed by requantization to INT8.
-  Impact: Rijul's layer norm block accepts INT32, computes in FP32 internally,
-  outputs INT8. Gamma/beta learnable parameters stored as FP32 or INT8 (TBD by Rijul).
+A9. RMSNorm: FP32 internal, INT8 output (no mean subtraction)
+  Rationale: TinyLlama uses RMSNorm, not LayerNorm. RMSNorm has no mean subtraction —
+  only RMS scaling: rms = sqrt(mean(x²) + eps); out = x / rms * weight.
+  FP32 internal computation (Vivado IP or soft-float) followed by requantization to INT8.
+  Impact: Rijul's RMSNorm block accepts INT32, computes in FP32 internally,
+  outputs INT8. One learned weight vector (gamma only — no beta in RMSNorm).
 
 A10. Residual add: INT32 + INT32 → INT32, then requantize to INT8
   Rationale: Adding INT8 directly risks overflow for large activations. Conservatively
@@ -99,6 +104,31 @@ A12. Single BRAM per buffer (no double buffering in Phase 1)
   uses single buffers; double buffering is a Week 3 / Phase 2 addition.
   Impact: Host must finish loading weights before issuing start. No weight streaming
   concurrency. Samarth adds double buffering in Week 3 if time allows.
+
+A13. Weight storage in HBM (not on-chip BRAM/URAM)
+  Rationale: One TinyLlama decoder layer's weights at INT8 ≈ 43.5 MB. The U55C has
+  ~43.6 MB total on-chip memory (BRAM + URAM combined) — zero headroom for activations
+  or control. All 22 layers (957 MB) are impossible on-chip. HBM provides 8 GB at
+  ~460 GB/s — sufficient for weight streaming.
+  Impact: Weights stream from HBM to on-chip buffer per GEMM step. Activations
+  (≤ 2 KB per vector at INT8) remain on-chip in BRAM.
+
+A14. One decoder layer instantiated, reused 22× via host-driven loop
+  Rationale: TinyLlama has 22 identical decoder layers. Instantiating 22 separate
+  layers in RTL would consume 22× the resources and still not fit weights on-chip.
+  One parameterised layer is instantiated; the host drives a 22-iteration loop,
+  loading the correct HBM weight bank and issuing start/done each iteration.
+  Impact: The FSM does not need a layer_idx counter — the host manages layer sequencing.
+  RTL is simpler; host (Om) implements the loop.
+
+A15. MAC array target width: ~512 lanes for TinyLlama throughput
+  Rationale: 8-lane Phase 1 array gives ~seconds/token for TinyLlama (Q projection
+  alone: 524K cycles). 512 lanes brings Q projection to ~8K cycles (27 μs at 300 MHz),
+  yielding ~120 tokens/sec estimated. U55C has 9,024 DSPs; 512-lane INT8 array uses
+  ~256 DSPs (3%). Phase 1 uses 8 lanes for simulation; target is 512 lanes for
+  end-to-end TinyLlama demo.
+  Impact: Rijul scales mac_array.sv from N=8 to N=512 lanes. FSM tiling logic is
+  unchanged (parameterised by T). Weight BRAM/buffer width scales proportionally.
 
 ---
 

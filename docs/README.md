@@ -28,7 +28,7 @@ Color-coded by block type (green = shared MAC array, red = dedicated new hardwar
 Explains what the hardware computes and why it is designed the way it is. Covers the full decoder layer math, INT8 quantization, the tiling loop, output-stationary dataflow, and how the four team members' work fits together.
 
 ### `block_diagram.md`
-Two-section document. Section 2 (full transformer pipeline): inter-block signal tables for all stages (input buffer, shared MAC array, re-quantize, softmax, activation, residual adders ×2, layer norm ×2, output buffer) and the host-side sequencer pseudocode. Section 1 (GEMM engine): FSM signal tables, BRAM addressing, tiling strategy, and cycle-by-cycle trace.
+Two-section document. Section 2 (full transformer pipeline): inter-block signal tables for all stages (input buffer, shared MAC array, re-quantize, softmax, SiLU+multiply, residual adders ×2, RMSNorm ×2, output buffer) using TinyLlama-correct block names (RMSNorm not LayerNorm, SwiGLU not 2-layer FFN). Section 1 (GEMM engine): FSM signal tables, BRAM addressing, tiling strategy, and cycle-by-cycle trace.
 
 ### `design_decisions.txt`
 Three sections: (A) conservative decisions made to unblock RTL and documentation, (B) open decisions requiring team discussion, (C) implemented decisions. Updated when decisions change.

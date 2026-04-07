@@ -159,8 +159,8 @@ module tb_top;
 
     // ── Main test ─────────────────────────────────────────
     initial begin
-        $dumpfile("sim/tb_top.vcd");
-        $dumpvars(0, tb_top);
+        // $dumpfile("sim/tb_top.vcd");
+        // $dumpvars(0, tb_top);
 
         errors = 0;
 
