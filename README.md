@@ -87,6 +87,12 @@ Project/
 - [docs/block_diagram.md](docs/block_diagram.md)
   Text explanation of the full post-Phase-1 architecture plus the legacy GEMM validation core.
 
+- [docs/modules.md](docs/modules.md)
+  Physical module inventory for the U55C implementation, including the RTL/HLS split, bus plan, and required blocks.
+
+- [docs/implementation_checklist.md](docs/implementation_checklist.md)
+  File-by-file coding plan for the new TinyLlama RTL/HLS implementation, including dependencies, stub order, and first verification targets.
+
 - [model/README.md](model/README.md)
   Software reference path, TinyLlama NumPy inference, and GEMM-only INT8 bridge.
 

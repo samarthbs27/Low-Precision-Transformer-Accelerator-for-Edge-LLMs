@@ -80,6 +80,10 @@ A6. Full TinyLlama attention architecture: 32 Q heads / 4 KV heads (GQA)
 A7. KV cache is required
   Each layer owns one K cache and one V cache.
   Prefill writes the prompt's K/V rows into cache.
+  The cached K row format is post-RoPE K, not pre-RoPE K.
+  The cached V row format is post-projection V.
+  During decode, the new K row is RoPE-transformed before cache append, and
+  cached K rows are read back directly without reapplying RoPE.
   Decode reads all previous cache rows and appends one new row per step.
   Storage location: HBM.
   Architectural format: symmetric INT8 cache with explicit scale metadata.
@@ -195,6 +199,8 @@ B1. LM head precision policy
 B2. KV-cache precision policy
   The production KV cache is symmetric INT8 in HBM.
   K and V are stored separately.
+  Cached K rows are stored after RoPE has already been applied.
+  Cached V rows are stored after the V projection output is produced.
   Scale metadata is stored separately for K and V.
   Scale granularity is fixed to per-layer, per-KV-head.
   Cache layout is fixed to:

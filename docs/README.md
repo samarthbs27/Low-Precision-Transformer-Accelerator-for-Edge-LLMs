@@ -19,7 +19,17 @@ Design documentation for the TinyLlama U55C FPGA inference accelerator.
    The textual companion to the diagram. Section 2 explains the full TinyLlama
    prefill/decode architecture. Section 1 documents the existing GEMM validation core.
 
-4. `theory.md`
+4. `modules.md`
+   The hardware implementation inventory. This lists every required module,
+   whether it is RTL or HLS, what it does, what it connects to, and what
+   parallelism it uses.
+
+5. `implementation_checklist.md`
+   The file-by-file execution plan. This lists the planned source tree,
+   implementation order, dependencies, stub-first strategy, and first
+   verification target for each RTL/HLS/support file.
+
+6. `theory.md`
    Mathematical background for the transformer blocks, INT8 quantization, and
    hardware mapping concepts.
 
@@ -32,6 +42,8 @@ Design documentation for the TinyLlama U55C FPGA inference accelerator.
 | `design_decisions.txt` | Finalized implementation decisions for the TinyLlama U55C accelerator |
 | `block_diagram.drawio` | Editable system architecture diagram; source of truth for the visual dataflow |
 | `block_diagram.md` | System-level architecture explanation plus legacy GEMM-engine details |
+| `modules.md` | Physical module inventory for the FPGA implementation, including RTL/HLS split and interface plan |
+| `implementation_checklist.md` | File-by-file coding plan for the TinyLlama implementation, including dependencies and verification order |
 | `block_diagram.png` | Exported image artifact of the block diagram; may lag behind the `.drawio` source |
 | `theory.md` | Transformer and quantization theory reference |
 | `ClassProject_RC19_Milestone3.pdf` | Milestone 3 specification sheet |

@@ -1,2 +1,0 @@
-Systolic Array matrix multiplication animation: https://youtu.be/2VrnkXd9QR8?si=ieTbDLxH3488Ptzo, https://youtu.be/DzeTDFwGcIs?si=n6NcFSS3IDVsfDUe
-
