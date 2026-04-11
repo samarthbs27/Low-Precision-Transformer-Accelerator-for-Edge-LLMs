@@ -18,7 +18,6 @@ Together, they describe both:
 - `tinyllama_gemm_int8.py`: mixed-precision INT8 bridge with `analysis` and autoregressive `generate` modes.
 - `model.py`: smaller quantization and FFN experiments used for early datapath work.
 - `gen_test_vectors.py`: helper script for producing simulation vectors.
-- `data/tinyllama_weights.npz`: saved TinyLlama weights and metadata archive.
 
 ## Purpose Of `tinyllama.py`
 
@@ -73,9 +72,10 @@ What it does not quantize yet:
 This is the right intermediate step before a full FPGA implementation because it
 lets us isolate how much error comes from quantized matrix multiplies alone.
 
-## TinyLlama Configuration In The Saved Archive
+## TinyLlama Configuration Used By The Scripts
 
-The current `model/data/tinyllama_weights.npz` archive contains metadata for:
+The TinyLlama reference and quantization scripts are built around the following
+model metadata:
 
 - model id: `TinyLlama/TinyLlama-1.1B-Chat-v1.0`
 - hidden size: `2048`
@@ -90,8 +90,8 @@ The current `model/data/tinyllama_weights.npz` archive contains metadata for:
 - RMSNorm epsilon: `1e-5`
 - RoPE theta: `10000.0`
 
-These values are loaded from metadata in the `.npz` file by the `TinyLlamaWeights`
-class inside `tinyllama.py`.
+When a local weights export is present, these values are loaded from archive
+metadata by the `TinyLlamaWeights` class inside `tinyllama.py`.
 
 ## Important Architectural Differences From The Old Pythia Direction
 
@@ -315,10 +315,6 @@ What it saves:
 - per-layer MLP weights
 - per-layer RMSNorm vectors
 
-Archive facts for the current saved file:
-- number of arrays: `212`
-- stored dtype by default: `float16`
-
 Why save as float16 by default:
 - TinyLlama 1.1B is much larger than Pythia-70M
 - on-disk float16 is much more manageable
@@ -408,7 +404,7 @@ Important flags:
 - `--save-weights`: download or load the HuggingFace model and save the `.npz` archive
 - `--prompt`: prompt string for generation
 - `--model-id`: HuggingFace model id, default is TinyLlama chat
-- `--weights`: path to the `.npz` archive, default is `model/data/tinyllama_weights.npz`
+- `--weights`: path to a local `.npz` archive produced by `--save-weights`
 - `--max-tokens`: number of new tokens to generate
 - `--save-dtype`: `float16` or `float32` for the saved archive
 - `--local-files-only`: do not fetch from the network, use local HuggingFace cache only

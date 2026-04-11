@@ -3,264 +3,212 @@
 
 > Visual diagram: open `block_diagram.drawio` with the Draw.io Integration VS Code extension.
 
-> **Scope note (2026-04-06):** This document covers two levels:
-> - **Section 1 (GEMM Engine)** — the shared MAC array and its tiling FSM. This is fully implemented and verified.
-> - **Section 2 (Full Transformer Pipeline)** — signal tables and dataflow for the complete on-chip decoder layer. Conservative design decisions are recorded in `docs/design_decisions.txt`.
-
-> **Phase 1 split note (2026-04-07):** The current Phase 1 system split is host-heavy.
-> The host CPU performs tokenization, embedding lookup, the 22-layer reuse loop,
-> final RMSNorm, LM head, and sampling. The FPGA portion documented below is one
-> reused TinyLlama decoder-layer datapath.
+> **Scope note (2026-04-10):** This document now covers two levels:
+> - **Section 1 (GEMM Engine)** — the existing shared MAC array and tiling FSM validation core. This is still the implemented low-level compute foundation.
+> - **Section 2 (Target TinyLlama System)** — the post-Phase-1 U55C architecture: prefill + decode, KV cache, one reused decoder-layer engine, and FPGA-side final token selection.
 
 ---
 
-## Section 2 — Full Transformer Decoder Layer Pipeline
+## Section 2 - Target TinyLlama U55C Architecture
 
-### Pipeline Overview
+### System Overview
 
 ```
-Host CPU (x86)
-     |  tokenization / embedding lookup / 22-layer loop
-     |  final RMSNorm / LM head / sampling live on host in Phase 1
-     |  PCIe / XRT
-     v
-FPGA Boundary
-     |
-     +-- Layer Input X (current hidden state / first-layer input) --+
-     |                                                        |
-     |   [RMSNorm 1]  (pre-attention)                        |
-     |   attn_input = x / rms(x) × weight  → INT8           |
-     |                                                        |
-     |   [GEMM 1: Q Projection]  attn_input * WQ → Q        |
-     |   [GEMM 2: K Projection]  attn_input * WK → K        |
-     |   [GEMM 3: V Projection]  attn_input * WV → V        |
-     |                                                        |
-     |   [RoPE]  Q_rot, K_rot = rotate(Q, K, pos)           |
-     |                                                        |
-     |   [GEMM 4: Attn Scores]  Q_rot · K_rotᵀ / √d_k      |
-     |   [Causal Mask + Softmax]  softmax(scores) → weights  |
-     |   [GEMM 5: Weighted Sum]  weights × V → attn_out     |
-     |   [GEMM 6: W_O Proj]     attn_out * WO → proj_out    |
-     |                                                        |
-     |   [Residual Add 1]        x + proj_out → r1           |
-     |                                                        |
-     |   [RMSNorm 2]  (pre-FFN)                              |
-     |   ffn_input = r1 / rms(r1) × weight  → INT8          |
-     |                                                        |
-     |   [GEMM 7: gate_proj]    ffn_input * W_gate → gate ┐ |
-     |   [GEMM 8: up_proj]      ffn_input * W_up   → up   ┘ |
-     |   [SiLU + multiply]       SiLU(gate) × up → hidden    |
-     |   [GEMM 9: down_proj]    hidden * W_down → ffn_out    |
-     |                                                        |
-     |   [Residual Add 2]        r1 + ffn_out → output       |
-     |                                                        |
-     +-- Hidden-State / Result Buffer (y: d_model x 1, INT32) --+
-     |
-     v  PCIe / XRT
-Host CPU
-     |  after layer 22: final RMSNorm → LM head → sampling
+Host CPU / XRT
+    |
+    | prompt token ids, generation parameters, launch
+    v
+FPGA Accelerator (U55C)
+    |
+    +-- On-chip Prefill/Decode Controller -------------------------------+
+    |                                                                    |
+    |   [Embedding Lookup]                                               |
+    |      token ids -> x0                                               |
+    |                                                                    |
+    |   [One Reused TinyLlama Decoder-Layer Engine]                      |
+    |      reused for layer_idx = 0..21                                  |
+    |      same tensor sizes every layer                                 |
+    |      different weights and KV-cache region per layer               |
+    |                                                                    |
+    |   [Final RMSNorm]                                                  |
+    |   [LM Head Projection]                                             |
+    |   [Greedy Argmax]                                                  |
+    |                                                                    |
+    +--------------------------------------------------------------------+
+    |
+    +-- HBM --------------------------------------------------------------+
+        | layer weights
+        | embedding / LM head weights
+        | per-layer K cache
+        | per-layer V cache
+        +---------------------------------------------------------------+
+
+Host CPU / XRT
+    ^
+    | generated token ids, status, optional debug dumps
+    |
+FPGA Accelerator
 ```
 
-**Conservative assumptions (see design_decisions.txt for full rationale):**
-- `seq_len = 1` (single token — autoregressive decode)
-- `d_model = 64` (test); TinyLlama target: `d_model = 2048`, `d_ff = 5632`, 32Q/4KV GQA heads
-- The draw.io labels show the target TinyLlama logical Q/K/V structure (32 Q / 4 KV GQA heads)
-- Conservative Phase 1 implementation simplification remains single attention head / reduced test configuration
-- All GEMM inputs are INT8; all GEMM outputs are INT32
-- INT32 → INT8 re-quantization (static scales) between GEMM output and next GEMM input
-- Host-side pipeline sequencer (Option A): host issues `start` per GEMM step and loads buffers between steps
-- Normalization: **RMSNorm** (no mean subtraction); activation: **SiLU** (SwiGLU MLP structure)
-- Around the full layer datapath, hidden-state / result buffers are treated as INT32; INT8 is the GEMM-facing operand format after re-quantization
+### Architecture Summary
 
----
+- Target model: TinyLlama 1.1B (`hidden_size=2048`, `intermediate_size=5632`, `22` decoder layers, `32` Q heads, `4` KV heads, `head_dim=64`)
+- Runtime modes:
+  - `prefill`: process the full prompt sequence and populate the KV cache
+  - `decode`: process one new token at a time using the existing KV cache
+- Control ownership:
+  - host: tokenization, launch, parameter upload, detokenization, display
+  - FPGA: embedding lookup, layer execution, KV-cache management, final RMSNorm, LM head, greedy argmax, and EOS/max-token stop handling
+- Memory ownership:
+  - HBM: weights, embeddings, LM head, K cache, V cache, debug buffer
+  - BRAM/URAM: on-chip activation tiles, weight tiles, partial sums, metadata
+  - U55C HBM organization: `32` pseudo-channels across `16 GB` of HBM
 
-### Pipeline Step Signal Tables
+### Reused Decoder-Layer Engine
 
-Conservative decisions applied: INT32 outputs from MAC array, INT8 inputs to each GEMM.
-`done` is the existing FSM output. `start` is the existing FSM input. Shared MAC array
-is re-invoked for each GEMM step with different weights loaded into Weight BRAM.
+All 22 TinyLlama decoder layers use the same block structure and the same tensor sizes.
+The accelerator therefore instantiates one decoder-layer engine and reuses it for
+`layer_idx = 0..21`.
 
----
+What is identical across all layers:
+- hidden size `2048`
+- intermediate size `5632`
+- `32` Q heads / `4` KV heads
+- head dimension `64`
+- same ordered block sequence
 
-#### Input Buffer  *(Host → FPGA)*
+What changes per layer:
+- the weights
+- the two RMSNorm gamma vectors
+- that layer's KV-cache region
 
-| Direction | Signal | Width | Description |
-|---|---|---|---|
-| IN ← Host (PCIe) | `wr_en` | 1 | Write enable from XRT kernel |
-| IN ← Host (PCIe) | `wr_addr` | 7b | Byte address into input buffer |
-| IN ← Host (PCIe) | `wr_data` | 8b INT8 | Current layer input operand x[0..d_model-1] (first pass from embedding-derived input; later passes from prior hidden-state routing / requantization) |
-| OUT → Shared MAC Array | `x[k]` | 8b INT8 | Broadcast to all 8 MAC lanes during COMPUTE |
-
----
-
-#### Shared MAC Array + Control FSM  *(Samarth + Rijul)*
-
-Re-invoked for each of the 9 GEMM steps. Host loads the correct weight tile into
-Weight BRAM and asserts `start` before each invocation.
-
-| Direction | Signal | Width | Description |
-|---|---|---|---|
-| IN ← Host | `start` | 1 | Begin GEMM. FSM leaves IDLE. |
-| IN ← Input Buffer | `x[k]` | 8b INT8 | Current input element, broadcast to all 8 lanes |
-| IN ← Weight BRAM | `W[j,k] × 8` | 8×8b INT8 | One weight per lane per cycle |
-| OUT → MAC lanes | `mac_valid` | 1 | HIGH only during COMPUTE state |
-| OUT → Accumulators | `clear_acc` | 1 | Pulse 1 cycle before each tile COMPUTE |
-| OUT → Output Buffer | `wr_en` | 1 | 1-cycle pulse in WRITE state per tile |
-| OUT → Output Buffer | `wr_addr` | 4b | Tile index (0..7), selects output slot group |
-| OUT → Host | `done` | 1 | 1-cycle pulse after all tiles complete |
-
----
-
-#### Intermediate Output Buffer  *(between GEMM steps)*
-
-One shared INT32 result buffer (64 × 32b). Re-used across GEMM steps; host or
-requantize block reads from it before the next GEMM begins.
-
-| Direction | Signal | Width | Description |
-|---|---|---|---|
-| IN ← MAC Array | `tile_results` | 8×32b INT32 | 8 accumulator values written per tile |
-| IN ← FSM | `wr_en` | 1 | Write enable (1 cycle per tile) |
-| IN ← FSM | `wr_addr` | 4b | Tile index for write slot selection |
-| OUT → Requantize / Dedicated Block | `y[i]` | 32b INT32 | Full result vector after `done` |
-
----
-
-#### Re-quantize Block  *(between GEMM output and next GEMM input — Rijul or Samarth)*
-
-Converts INT32 GEMM output to INT8 for the next stage's input BRAM.
-Scale values loaded by host before pipeline start.
-
-| Direction | Signal | Width | Description |
-|---|---|---|---|
-| IN ← Output Buffer | `y_int32[i]` | 32b INT32 | Raw accumulator output |
-| IN ← Scale Register | `scale` | 32b FP32 | Per-tensor quantization scale (offline) |
-| OUT → Input Buffer (next step) | `y_int8[i]` | 8b INT8 | Clipped/rounded INT8 output |
-
-*Operation: `y_int8 = clamp(round(y_int32 / scale), -128, 127)`*
-
----
-
-#### Causal Mask + Softmax Unit  *(Rijul)*
-
-Applies the causal mask and then the softmax. For `seq_len=1`, softmax of a
-single score is 1.0, so this block is effectively a passthrough in Phase 1.
-Signal table designed for Phase 2 multi-token support.
-
-| Direction | Signal | Width | Description |
-|---|---|---|---|
-| IN ← Attention Score Buffer | `scores[i]` | 32b INT32 | Raw attention scores Q·Kᵀ/√d_k |
-| IN ← Control | `start` | 1 | Begin softmax computation |
-| OUT → Weighted Sum | `weights[i]` | 8b INT8 | Normalized attention weights (INT8) |
-| OUT → Control | `done` | 1 | Softmax complete |
-
-*Phase 1 (seq_len=1): `weights[0] = 1.0` → output = INT8 max (127), bypass multiply.*
-
----
-
-#### SiLU + Elementwise Multiply Unit  *(Rijul)*
-
-Implements the SwiGLU nonlinearity between gate_proj/up_proj and down_proj.
-Receives both the gate vector and the up vector; outputs `SiLU(gate) × up`.
-
-| Direction | Signal | Width | Description |
-|---|---|---|---|
-| IN ← Gate Buffer | `gate[i]` | 32b INT32 | Output of gate_proj GEMM (d_ff × 1) |
-| IN ← Up Buffer | `up[i]` | 32b INT32 | Output of up_proj GEMM (d_ff × 1) |
-| IN ← Control | `start` | 1 | Begin SiLU + multiply |
-| OUT → Input Buffer (down_proj step) | `hidden[i]` | 8b INT8 | SiLU(gate) × up, re-quantized to INT8 |
-| OUT → Control | `done` | 1 | Complete |
-
-*SiLU: `silu(x) = x / (1 + exp(-x))`;  output: `hidden[i] = requantize(silu(gate[i]) * up[i])`*
-
----
-
-#### Residual Adder ×2  *(Samarth)*
-
-Two instances: after attention W_O projection (Add 1), after FFN W2 projection (Add 2).
-Inputs are INT32 (zero-extended from INT8), output is INT32 before re-quantization.
-
-| Direction | Signal | Width | Description |
-|---|---|---|---|
-| IN ← Buffer A | `a[i]` | 32b INT32 | First operand (e.g., original input x) |
-| IN ← Buffer B | `b[i]` | 32b INT32 | Second operand (e.g., GEMM projection output) |
-| IN ← Control | `start` | 1 | Begin element-wise add |
-| IN ← Control | `n` | 7b | Number of elements (d_model = 64) |
-| OUT → Output Buffer | `sum[i]` | 32b INT32 | a[i] + b[i], then re-quantize to INT8 |
-| OUT → Control | `done` | 1 | Add complete |
-
----
-
-#### RMSNorm ×2  *(Rijul)*
-
-Two instances: after Residual Add 1 (RMSNorm 1), after Residual Add 2 (RMSNorm 2).
-TinyLlama uses RMSNorm — **no mean subtraction**, only RMS scaling. Internal FP32 arithmetic; outputs INT8 for next GEMM input.
-
-| Direction | Signal | Width | Description |
-|---|---|---|---|
-| IN ← Residual Add Output | `x[i]` | 32b INT32 | Input vector to normalize (d_model × 1) |
-| IN ← Parameter BRAM | `weight[i]` | 32b FP32 | Per-element gain parameter (gamma only — no beta in RMSNorm) |
-| IN ← Control | `start` | 1 | Begin RMSNorm |
-| OUT → Input Buffer (next step) | `rn_out[i]` | 8b INT8 | Normalized, scaled, re-quantized |
-| OUT → Control | `done` | 1 | RMSNorm complete |
-
-*Internal: `rms = sqrt(mean(x²) + eps);  rn_out[i] = requantize(weight[i] * x[i] / rms)`*
-
----
-
-### Host-Side Pipeline Sequencer (Option A — Phase 1)
-
-The host issues one `start` pulse per GEMM step and one trigger per dedicated block.
-Between steps, the host loads the next weight tile and routes buffer pointers.
+### Decoder-Layer Engine Flow
 
 ```
-Host loop (pseudocode — host owns embedding lookup, the 22-layer reuse loop, final RMSNorm, LM head, and sampling):
-
-  x = host_embedding_lookup(current_token)
-
-  for layer_idx in 0..21:
-
-    # Pre-attention RMSNorm
-    start_rmsnorm(x, rn1_weight); wait_done()         → attn_input
-
-    # QKV projections (attn_input is the new GEMM input)
-    load_weights(WQ); start_gemm(); wait_done()        → Q
-    requantize(Q, scale_Q)                             → Q_int8
-    load_weights(WK); start_gemm(); wait_done()        → K
-    requantize(K, scale_K)                             → K_int8
-    load_weights(WV); start_gemm(); wait_done()        → V
-    requantize(V, scale_V)                             → V_int8
-
-    # Attention
-    start_rope(Q_int8, K_int8, pos); wait_done()       → Q_rot, K_rot
-    load_weights(none); start_gemm(Q_rot, K_rot); wait_done() → attn_scores
-    start_softmax(attn_scores); wait_done()            → weights (passthrough for seq_len=1)
-    load_weights(none); start_gemm(weights, V); wait_done()   → attn_out
-    requantize(attn_out, scale_attn)                   → attn_out_int8
-
-    # Output projection + residual
-    load_weights(WO); start_gemm(); wait_done()        → proj_out
-    start_residual_add(x, proj_out); wait_done()       → r1
-
-    # Pre-FFN RMSNorm
-    start_rmsnorm(r1, rn2_weight); wait_done()         → ffn_input
-
-    # SwiGLU FFN
-    load_weights(W_gate); start_gemm(); wait_done()    → gate
-    load_weights(W_up);   start_gemm(); wait_done()    → up
-    start_silu_multiply(gate, up); wait_done()         → hidden
-    requantize(hidden, scale_hidden)                   → hidden_int8
-    load_weights(W_down); start_gemm(); wait_done()    → ffn_out
-
-    # Second residual
-    start_residual_add(r1, ffn_out); wait_done()       → output
-
-    dma_to_host(output)   # or keep in host-visible buffer
-    x = output            # feed layer output into the next layer iteration
-
-  final_hidden = host_final_rmsnorm(x)
-  logits = host_lm_head(final_hidden)
-  next_token = host_sample(logits)
+layer_input
+  -> RMSNorm 1
+  -> Q / K / V projections
+  -> RoPE on Q / K
+  -> attention score computation
+  -> causal mask + softmax
+  -> weighted sum with V
+  -> O projection
+  -> residual add
+  -> RMSNorm 2
+  -> gate projection
+  -> up projection
+  -> SiLU + elementwise multiply
+  -> down projection
+  -> residual add
+  -> layer_output
 ```
+
+The shared GEMM engine is reused for:
+- Q projection
+- K projection
+- V projection
+- attention scores
+- weighted sum with V
+- O projection
+- gate projection
+- up projection
+- down projection
+- LM head projection
+
+So there are two levels of reuse:
+- one shared GEMM engine reused across all GEMM-heavy blocks inside a layer
+- one decoder-layer engine reused across all 22 layers
+
+### Prefill Versus Decode
+
+#### Prefill
+
+- input: full prompt token sequence
+- prefill is sequence-tiled with a fixed tile length of `64` tokens
+- embedding lookup produces the first layer input sequence
+- every layer writes K and V rows for every processed position into that layer's KV cache
+- softmax runs over the real prompt sequence length with a true causal mask
+- after layer 21, final RMSNorm + LM head produce the next-token logits
+
+#### Decode
+
+- input: one new token id
+- embedding lookup produces one new token embedding
+- each layer reads its existing KV cache, appends one new K row and one new V row
+- query length is `1`, key length is `cache_len + 1`
+- after layer 21, final RMSNorm + LM head produce logits for the next token
+- greedy argmax selects the emitted token id
+
+### Mixed-Precision / Quantization Split
+
+Quantized GEMM-heavy blocks:
+- embedding output path into the decoder datapath
+- Q / K / V / O projections
+- attention score computation
+- weighted sum with V
+- gate / up / down projections
+- LM head projection
+
+Arithmetic for quantized GEMMs:
+- inputs: `INT8`
+- weights: `INT8`
+- accumulation: `INT32`
+
+Higher-precision blocks:
+- RMSNorm
+- RoPE
+- softmax
+- final RMSNorm
+
+Residual accumulation remains `INT32` before requantization.
+KV cache is stored in HBM as symmetric `INT8`, with scale metadata tracked separately for `K` and `V` per layer and per KV head.
+
+### System Blocks And Responsibilities
+
+| Block | Main job |
+|---|---|
+| Host CPU / XRT | tokenize, launch, upload prompt/params, read generated tokens |
+| On-chip Prefill/Decode Controller | sequence prefill and decode, iterate `layer_idx`, manage stop conditions and cache pointers |
+| Embedding Lookup | map token ids to the first activation vector/sequence |
+| Reused Decoder-Layer Engine | execute one TinyLlama decoder layer for the current `layer_idx` |
+| Shared GEMM Engine | run all GEMM-heavy projections and reductions in tiled form |
+| Dedicated Blocks | RMSNorm, RoPE, softmax, SiLU, elementwise multiply, residual add |
+| HBM Weight Store | hold layer weights, embeddings, LM head weights, and quantization metadata |
+| HBM KV Cache | hold per-layer K and V cache state across prefill/decode in INT8 form |
+| Final Norm + LM Head + Token Select | convert final hidden state to logits, then choose the next token with greedy argmax |
+
+### Controller Pseudocode
+
+```text
+prefill(prompt_tokens):
+    x = embedding_lookup(prompt_tokens)
+    for layer_idx in 0..21:
+        x = decoder_layer_engine_prefill(x, layer_idx, kv_cache[layer_idx])
+    hidden = final_rmsnorm(x[-1])
+    logits = lm_head(hidden)
+    next_token = greedy_argmax(logits)
+
+decode(next_input_token):
+    x = embedding_lookup([next_input_token])
+    for layer_idx in 0..21:
+        x = decoder_layer_engine_decode(x, layer_idx, kv_cache[layer_idx])
+    hidden = final_rmsnorm(x[-1])
+    logits = lm_head(hidden)
+    next_token = greedy_argmax(logits)
+    return next_token
+```
+
+### Relationship To Section 1
+
+Section 1 below remains useful and accurate as the currently implemented GEMM
+validation core. It is not, by itself, the full TinyLlama inference system.
+The full accelerator now adds:
+- prefill/decode control
+- full TinyLlama dimensions
+- grouped-query attention
+- HBM-resident weights
+- HBM-resident KV cache
+- FPGA-side final RMSNorm / LM head / token selection
 
 ---
 
@@ -297,8 +245,9 @@ stateDiagram-v2
 
 ### Host CPU — *Om*
 The outside world. Sits outside the FPGA boundary and communicates over PCIe.
-In the current Phase 1 split, it also owns tokenization, embedding lookup, the
-22-layer reuse loop, final RMSNorm, LM head, and sampling.
+In the earlier Phase 1 validation split, it also owned tokenization, embedding
+lookup, the 22-layer reuse loop, final RMSNorm, LM head, and sampling. That is
+legacy validation behavior, not the current post-Phase-1 target architecture.
 
 | Direction | Signal | Width | Description |
 |---|---|---|---|

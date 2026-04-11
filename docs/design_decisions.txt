@@ -1,254 +1,323 @@
-DESIGN DECISIONS — FPGA Transformer Decoder Accelerator
-=========================================================
-Last updated: 2026-04-06
+DESIGN DECISIONS - TinyLlama U55C Inference Accelerator
+=======================================================
+Last updated: 2026-04-10
 Author: Samarth (Dataflow, Tiling, Control)
 
-This file tracks all conservative decisions made to unblock RTL/documentation work,
-and all open decisions that still require team discussion or have been resolved.
+This file tracks the current architecture decisions for the post-Phase-1
+TinyLlama implementation target on the Xilinx Alveo U55C. The goal is no
+longer a single-token toy pipeline. The goal is multi-token prompt ingestion
+plus autoregressive token generation for TinyLlama 1.1B using a mixed-precision
+FPGA accelerator.
 
 ---
 
-SECTION A — CONSERVATIVE DECISIONS (made now, may be revisited in Phase 2)
-============================================================================
+SECTION A - CURRENT ARCHITECTURE DECISIONS
+==========================================
 
-A1. Sequence length = 1 (single token)
-  Rationale: Autoregressive decode generates one token at a time. For seq_len=1
-  the QKV projections collapse to matrix-vector multiply (same as our existing GEMM
-  engine). The attention score Q*Kt is a dot-product of length d_k, and softmax of
-  a single score is trivially 1.0 (passthrough). This eliminates the attention
-  sequence buffer and simplifies the softmax block significantly.
-  Impact: All GEMM steps remain Nx1 (matrix-vector, not matrix-matrix). No KV cache
-  needed for single-token demo. Lift this restriction in Phase 2 for sequence batches.
+A1. Target model and inference scope
+  Model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  hidden_size=2048, intermediate_size=5632, num_hidden_layers=22,
+  num_attention_heads=32, num_key_value_heads=4, head_dim=64,
+  vocab_size=32000, max_position_embeddings=2048, rope_theta=10000.0.
+  Goal: accept a prompt token sequence, perform prefill, then decode and emit
+  generated token ids until EOS or max_new_tokens.
 
-A2. Single attention head
-  Rationale: Multi-head attention requires splitting Q/K/V into h heads, running h
-  parallel attention sub-operations, then concatenating. For Phase 1 we treat the
-  full d_model as a single head (h=1). The MAC array is time-multiplexed across heads
-  in Phase 2 if needed.
-  Impact: Q, K, V projections each produce one d_model vector. No head-splitting logic.
+A2. Two runtime modes: prefill and decode
+  Prefill consumes the full prompt sequence length S (1..2048), applies the
+  causal mask across the prompt, and writes K/V for every processed position
+  into the KV cache.
+  Decode consumes one new token at a time, reads the existing KV cache,
+  appends one new K row and one new V row per layer, and emits one next-token id.
+  This removes the old seq_len=1-only simplification from the architecture.
 
-A3. Model dimensions: d_model=64, d_ff=256, seq_len=1 (Phase 1 test only)
-  Rationale: Small enough to simulate end-to-end in Icarus Verilog.
-  TinyLlama target: d_model=2048, d_ff=5632, 32 Q heads / 4 KV heads (GQA).
-  Impact: Phase 1 test vectors use N=64, K=64. FSM is parameterised (N, K, T) so
-  scaling to TinyLlama dimensions only requires changing parameters and BRAM sizing.
+A3. Control ownership: FPGA owns model execution, host owns software I/O
+  Host responsibilities: tokenization/detokenization, model launch via XRT,
+  prompt token upload, generation parameter upload, and generated token readback.
+  FPGA responsibilities: embedding lookup, prefill scheduling, 22-layer execution,
+  KV-cache management, final RMSNorm, LM head projection, greedy argmax, and
+  the decode-step loop.
+  The runtime interface is host-launch / FPGA-execute / host-readback.
+  Step-by-step host control exists only in simulation/testbench infrastructure,
+  not in the deployed FPGA runtime path.
 
-A4. Inter-block data format: INT32 internal, INT8 at GEMM inputs
-  Rationale: The MAC array accumulates in INT32. Dedicated blocks (softmax, layer norm,
-  activation) receive INT32 from the output buffer and produce INT8 for the next GEMM
-  input. This avoids precision loss inside the compute path while keeping GEMM inputs
-  at INT8 to use the full throughput of the INT8 MAC array.
-  Impact: Output buffer is INT32 (64 x 32b). Re-quantization block needed between
-  each GEMM output and the next GEMM input. Conservative choice: re-quantize using
-  host-provided static scales (offline calibration by Satyarth).
+A4. One decoder-layer engine reused 22 times
+  TinyLlama has 22 decoder layers with the same block structure and tensor sizes.
+  All 22 layers use the same datapath shape:
+    RMSNorm -> Q/K/V -> RoPE -> attention scores -> softmax -> weighted sum ->
+    O projection -> residual add -> RMSNorm -> gate/up -> SiLU*multiply ->
+    down projection -> residual add
+  The layer engine is instantiated once and reused for layer_idx = 0..21.
+  What changes per layer: weights, two RMSNorm gamma vectors, and that layer's
+  KV-cache region.
+  What stays the same per layer: hidden size, FFN size, head counts, head_dim,
+  and control/dataflow shape.
 
-A5. Re-quantization: static per-tensor scales, host-provided
-  Rationale: Dynamic quantization requires runtime max/min computation, adding hardware
-  and latency. Static scales computed offline (Satyarth's model.py) are simpler and
-  sufficient for a fixed demonstration model.
-  Impact: Host loads scale values into a small register file on FPGA before start.
-  Re-quantization block performs: INT8_out = clamp(round(INT32_in / scale), -128, 127).
-  Owner: Rijul (requantize unit) or can be embedded in softmax/layer norm.
+A5. GEMM engine reuse inside each layer
+  The shared GEMM engine is reused for all GEMM-heavy operations:
+    - Q projection
+    - K projection
+    - V projection
+    - attention score computation
+    - weighted sum with V
+    - O projection
+    - gate projection
+    - up projection
+    - down projection
+    - LM head projection (tiled path)
+  This means there are two levels of reuse:
+    (i) one GEMM engine reused across all GEMMs in a layer
+    (ii) one decoder-layer engine reused across all 22 layers
 
-A6. Host-side pipeline sequencer (Option A — no on-chip sequencer FSM)
-  Rationale: Building a full on-chip sequencer FSM that chains all 8 GEMM steps and
-  6 dedicated blocks is a large Week 4 task. For Phase 1, the host (Om) issues start
-  pulses and switches buffer pointers between each GEMM invocation. The control_fsm.sv
-  remains a single-GEMM controller; the host sequences the full pipeline.
-  Impact: Each GEMM step requires a PCIe round-trip signal (start/done). Latency
-  includes host overhead per step. Acceptable for correctness demo; optimize in Phase 2
-  by moving sequencer on-chip.
-  Requires: Om to implement host-side sequencer loop.
+A6. Full TinyLlama attention architecture: 32 Q heads / 4 KV heads (GQA)
+  The single-head Phase 1 simplification is removed.
+  The accelerator implements grouped-query attention:
+    - 32 query heads
+    - 4 key/value heads
+    - 8 query groups per KV head
+  K/V repetition is logical reuse or address remapping, not a physical copy.
+  RoPE is applied to Q and K after projection and before score computation.
 
-A7. Activation function: SiLU (required by TinyLlama SwiGLU MLP)
-  Rationale: TinyLlama uses SwiGLU, not a standard 2-layer FFN. The activation is
-  SiLU: silu(x) = x / (1 + exp(-x)). This is not a Phase 1 simplification that can
-  be deferred — it is a correctness requirement for TinyLlama inference.
-  SwiGLU structure: gate_proj and up_proj run in parallel; SiLU applied to gate;
-  result element-wise multiplied with up; then down_proj.
-  Impact: Rijul implements a SiLU unit (LUT-based exp) + elementwise multiply block.
-  This replaces the previously planned ReLU/GELU activation unit.
+A7. KV cache is required
+  Each layer owns one K cache and one V cache.
+  Prefill writes the prompt's K/V rows into cache.
+  Decode reads all previous cache rows and appends one new row per step.
+  Storage location: HBM.
+  Architectural format: symmetric INT8 cache with explicit scale metadata.
+  K and V use separate scales.
+  Scale granularity: per-layer, per-KV-head, separately for K and V.
+  Cache layout in memory: [layer][kv_head][token][head_dim].
+  The implementation never depends on "softmax = 1 because seq_len=1".
 
-A8. Softmax: FP32 internal arithmetic
-  Rationale: Softmax requires exp() and division, which are not trivially INT8/INT32.
-  Use FP32 internally (Vivado Floating-Point IP or small LUT-based exp). For seq_len=1,
-  softmax(q) = 1.0 always, so Phase 1 softmax is a passthrough — this decision is
-  mainly load-bearing for Phase 2 multi-token support.
-  Impact: Rijul's softmax unit should accept INT32 attention scores and produce INT8
-  or FP32 output. For Phase 1 seq_len=1, it can be a wire (output = input / sum = 1.0).
+A8. Sequence support and masking
+  Supported prompt length: 1..2048 tokens.
+  Supported generation: until EOS or max_new_tokens.
+  Prefill uses a true causal mask over the prompt.
+  Decode uses query_len=1 and key_len=cache_len+1.
+  Softmax is therefore a real sequence-length-dependent block, not a permanent
+  passthrough stage.
 
-A9. RMSNorm: FP32 internal, INT8 output (no mean subtraction)
-  Rationale: TinyLlama uses RMSNorm, not LayerNorm. RMSNorm has no mean subtraction —
-  only RMS scaling: rms = sqrt(mean(x²) + eps); out = x / rms * weight.
-  FP32 internal computation (Vivado IP or soft-float) followed by requantization to INT8.
-  Impact: Rijul's RMSNorm block accepts INT32, computes in FP32 internally,
-  outputs INT8. One learned weight vector (gamma only — no beta in RMSNorm).
+A9. Mixed-precision / quantization split
+  Quantized GEMM-heavy blocks:
+    - embedding output path into the layer datapath
+    - Q / K / V / O projections
+    - attention score computation
+    - weighted sum with V
+    - gate / up / down projections
+    - LM head projection
+  Arithmetic for quantized GEMMs:
+    - inputs: INT8
+    - weights: INT8
+    - accumulation: INT32
+  Higher-precision blocks kept out of pure INT8:
+    - RMSNorm
+    - RoPE
+    - softmax
+    - final RMSNorm
+  Residual accumulation remains INT32 before requantization.
 
-A10. Residual add: INT32 + INT32 → INT32, then requantize to INT8
-  Rationale: Adding INT8 directly risks overflow for large activations. Conservatively
-  perform the add in INT32 (zero-extend inputs from INT8 to INT32 before adding),
-  then clip/requantize the result to INT8 for the next GEMM.
-  Impact: Samarth's residual adder block: takes two INT32 vectors, outputs one INT32
-  vector. Re-quantization (A5) applied downstream.
+A10. Quantization scale policy
+  Quantization is symmetric INT8 with zero_point = 0 everywhere.
+  Weight quantization: static per-output-channel scales.
+  Activation quantization: static per-tensor scales per block output.
+  KV-cache quantization: static per-layer, per-KV-head scales, stored separately
+  for K and V.
+  Calibration is performed offline from the TinyLlama reference path.
 
-A11. Output buffer holds INT32 (no in-place requantization)
-  Rationale: The MAC array writes INT32 accumulators. Requantizing inside the write path
-  would require scale registers inside the FSM/top. Conservative: write raw INT32,
-  let the requantize block operate as a separate pipeline stage.
-  Impact: Output buffer is 64 x 32b = 2 Kbyte per GEMM output. Acceptable for BRAM
-  budget on U55C.
+A11. Final RMSNorm, LM head, and token selection are on FPGA
+  After layer 21 output, the FPGA applies final RMSNorm, performs the LM head
+  projection as a tiled GEMM, and computes greedy argmax.
+  The FPGA emits token ids; the host detokenizes them for display.
+  Top-k and top-p sampling are not part of the initial implementation.
 
-A12. Single BRAM per buffer (no double buffering in Phase 1)
-  Rationale: Ping-pong (double buffering) allows overlapping weight streaming with
-  computation, but requires 2x BRAM and a more complex address controller. Phase 1
-  uses single buffers; double buffering is a Week 3 / Phase 2 addition.
-  Impact: Host must finish loading weights before issuing start. No weight streaming
-  concurrency. Samarth adds double buffering in Week 3 if time allows.
+A12. Memory residency on U55C
+  All model weights reside in HBM, including embeddings and LM head weights.
+  KV cache resides in HBM.
+  On-chip BRAM/URAM stores:
+    - activation tiles
+    - current Q/K/V/O tiles
+    - partial sums / accumulator tiles
+    - scale registers and control metadata
+  Full-model on-chip residency is not required.
+  The design uses the U55C HBM subsystem as the model-state store.
+  Board memory organization: 16 GB HBM exposed as 32 pseudo-channels
+  of 512 MB each.
 
-A13. Weight storage in HBM (not on-chip BRAM/URAM)
-  Rationale: One TinyLlama decoder layer's weights at INT8 ≈ 43.5 MB. The U55C has
-  ~43.6 MB total on-chip memory (BRAM + URAM combined) — zero headroom for activations
-  or control. All 22 layers (957 MB) are impossible on-chip. HBM provides 8 GB at
-  ~460 GB/s — sufficient for weight streaming.
-  Impact: Weights stream from HBM to on-chip buffer per GEMM step. Activations
-  (≤ 2 KB per vector at INT8) remain on-chip in BRAM.
+A13. Weight streaming and buffering
+  Double buffering / ping-pong buffering is mandatory for the full design, not
+  an optional later optimization.
+  The accelerator overlaps:
+    - HBM weight tile fetch
+    - HBM KV-cache fetch/write
+    - on-chip compute
+  Separate buffer sets are used for weights, activations, and KV tiles to avoid
+  stalling the GEMM engine.
 
-A14. One decoder layer instantiated, reused 22× via host-driven loop
-  Rationale: TinyLlama has 22 identical decoder layers. Instantiating 22 separate
-  layers in RTL would consume 22× the resources and still not fit weights on-chip.
-  One parameterised layer is instantiated; the host drives a 22-iteration loop,
-  loading the correct HBM weight bank and issuing start/done each iteration.
-  Impact: The FSM does not need a layer_idx counter — the host manages layer sequencing.
-  RTL is simpler; host (Om) implements the loop.
+A14. On-chip controller replaces per-GEMM host sequencing
+  The controller sequence is:
+    prompt tokens -> embedding lookup -> prefill -> decode loop ->
+    final token selection -> stop on EOS/max_new_tokens
+  Inside each decode step, the controller iterates:
+    layer_idx = 0..21
+  and inside each layer it schedules the required block sequence and memory moves.
+  The host never issues a PCIe round trip per GEMM in the deployed design.
 
-A15. MAC array target width: ~512 lanes for TinyLlama throughput
-  Rationale: 8-lane Phase 1 array gives ~seconds/token for TinyLlama (Q projection
-  alone: 524K cycles). 512 lanes brings Q projection to ~8K cycles (27 μs at 300 MHz),
-  yielding ~120 tokens/sec estimated. U55C has 9,024 DSPs; 512-lane INT8 array uses
-  ~256 DSPs (3%). Phase 1 uses 8 lanes for simulation; target is 512 lanes for
-  end-to-end TinyLlama demo.
-  Impact: Rijul scales mac_array.sv from N=8 to N=512 lanes. FSM tiling logic is
-  unchanged (parameterised by T). Weight BRAM/buffer width scales proportionally.
+A15. Throughput target and engine width
+  The implementation target is a 512-lane INT8 GEMM engine on U55C.
+  The existing 8-lane path remains simulation and validation infrastructure only.
+  The production accelerator uses the same control/dataflow pattern with the
+  512-lane engine width.
 
----
-
-SECTION B — DECISIONS NEEDING TEAM DISCUSSION (open items)
-============================================================
-
-B1. Inter-block handshake protocol (Samarth + Om + Rijul)
-  Question: When the FSM asserts done, does the dedicated block (softmax, layer norm,
-  etc.) start automatically, or does the host need to issue a separate start signal?
-  Options:
-    (i)  Host polls done, then issues start to next block. Simplest, no on-chip
-         sequencer needed. Adds 1-2 PCIe round-trip latencies per step.
-    (ii) On-chip: FSM done signal daisy-chained to next block's start. Removes host
-         from the inner loop. More complex, requires a sequencer or chain of enables.
-  Recommendation: Option (i) for Phase 1, revisit in Week 4. Confirm with Om.
-  Blocking: rtl/top.sv signal routing, Om's host program.
-
-B2. Requantization block: who implements it and where does it live? (Rijul + Samarth)
-  Question: Is the requantize block a separate RTL module, or embedded inside each
-  dedicated block (e.g., layer norm outputs INT8 directly)?
-  Options:
-    (i)  Separate requantize.sv module instantiated between each GEMM output and the
-         next stage's input buffer. Clean separation of concerns.
-    (ii) Embedded inside softmax/layer norm/activation output path. Fewer modules but
-         less reusable.
-  Blocking: affects signal tables for softmax, layer norm, activation.
-
-B3. Attention scores for seq_len=1 (Samarth + Rijul)
-  Question: For seq_len=1, Q*Kt is a single dot-product (scalar). Do we invoke the
-  full MAC array for this, or is it a special-case no-op (result = Q·K / sqrt(d_k)
-  is a single scalar passed directly to softmax)?
-  Conservative default: Invoke MAC array with Q (d_k x 1) and K (d_k x 1) using a
-  single tile. Samarth confirms this is just another GEMM call.
-  Blocking: attention scheduler logic.
-
-B4. W_O projection dimensions (Samarth + Satyarth)
-  Question: After the attention weighted sum, the output is d_v x 1 = 64 x 1.
-  W_O is d_model x d_v = 64 x 64. Confirm: this is another standard GEMM call
-  (N=64, K=64, same as the existing engine). Satyarth to confirm dimensions.
-
-B5. FFN dimensions (Satyarth to confirm)
-  Question: d_ff = 4 * d_model = 256 for a standard transformer. Satyarth's model
-  uses d_ff=256 (K=64→N=256 for W1, K=256→N=64 for W2). Confirm these are final.
-  Impact: Weight BRAM must be sized for the largest GEMM (K=256 for W2 input side).
-  Currently control_fsm.sv is parameterized (N, K, T) so this requires re-invoking
-  with different parameters — handled by host sequencer (see B1).
-
-B6. Layer norm gamma/beta parameter storage (Rijul)
-  Question: Gamma and beta are per-element scale/shift vectors (64 x FP32 or INT8).
-  Where are they stored? Options: small BRAM, register file, hardcoded.
-  Blocking: Rijul's layer norm module interface.
-
-B7. Softmax output format (Rijul)
-  Question: After softmax, does the output go directly to the weighted-sum GEMM?
-  For seq_len=1, the weighted sum (attention_weights x V) is just V (since weight=1.0).
-  Does Rijul's softmax output INT8 (for MAC array) or FP32 (for a separate multiply)?
-  Conservative default: for seq_len=1, weighted sum input = V directly (bypass softmax
-  multiply). Rijul to confirm.
-
-B8. Double buffering weight interface with Om (Samarth + Om)
-  Question: When Phase 1 is working, Samarth will add ping-pong BRAMs for weight
-  streaming. What is the PCIe write interface? Does Om use AXI4 bursts or individual
-  register writes? This affects BRAM address generation in top.sv.
-  Blocking: Week 3 work. Confirm with Om before implementation.
-
-B9. Clock domain: single clock for entire FPGA design? (Om)
-  Question: Is the entire accelerator (FSM, MAC array, dedicated blocks, BRAM) clocked
-  from a single clock domain? Or does the PCIe interface use a separate clock?
-  Conservative default: single 200 MHz clock for all RTL blocks; PCIe clock domain
-  crossing handled by Om's XRT shell.
-  Blocking: Om to confirm clock plan.
-
-B10. INT32 output DMA: how are 64 x 32b results transferred to host? (Om)
-  Question: Does Om's XRT kernel DMA the full output buffer (2 KB per GEMM result)
-  to host memory in a single burst, or does host poll word-by-word?
-  Conservative default: single burst DMA after done assertion.
-  Blocking: Om's host program and kernel design.
+A16. Accuracy bring-up path
+  Validation order:
+    1. floating-point TinyLlama reference
+    2. mixed-precision software bridge
+    3. one quantized decoder layer on FPGA
+    4. 22-layer quantized decode step on FPGA
+    5. full prefill + decode + token generation
+  The implementation includes a debug mode that dumps per-layer activations and
+  KV-cache slices for comparison against the software reference.
 
 ---
 
-SECTION C — IMPLEMENTED DESIGN DECISIONS (done, not up for discussion)
-=======================================================================
+SECTION B - FINALIZED IMPLEMENTATION CHOICES
+===========================================
 
-C1. Output-stationary accumulation (Samarth + Rijul)
-  Each MAC lane holds its accumulator across the full K loop. Avoids writing
-  partial sums to memory. Accumulators cleared at tile boundary via clear_acc.
-  Status: IMPLEMENTED in control_fsm.sv + mac_array.sv. Verified in simulation.
+B1. LM head precision policy
+  The LM head is implemented on FPGA as a tiled symmetric-INT8 GEMM:
+    - activations: INT8
+    - weights: INT8
+    - accumulation: INT32
+    - weight scales: static per-output-channel
+  Greedy argmax is computed after the FPGA-side LM head.
+  There is no higher-precision LM-head path in the production bitstream.
+  A higher-precision LM-head path exists only in a separate validation build.
 
-C2. Tile size T = 8 (= MAC array lanes)
-  One tile = 8 output elements computed simultaneously. For N=64: 8 tiles.
-  Status: IMPLEMENTED. All testbenches pass with T=8.
+B2. KV-cache precision policy
+  The production KV cache is symmetric INT8 in HBM.
+  K and V are stored separately.
+  Scale metadata is stored separately for K and V.
+  Scale granularity is fixed to per-layer, per-KV-head.
+  Cache layout is fixed to:
+    [layer][kv_head][token][head_dim]
+  Prefill writes one K row and one V row for every token position.
+  Decode reads the full cached prefix and appends one new K row and one new
+  V row per layer.
+  The production bitstream does not include an FP16 or FP32 KV-cache mode.
+  Any higher-precision cache path exists only in software or debug validation.
 
-C3. FSM states: IDLE → LOAD → COMPUTE → WRITE → (LOAD | DONE)
-  LOAD absorbs BRAM latency (LOAD_LAT=2 cycles). mac_valid LOW in LOAD/WRITE.
-  Status: IMPLEMENTED in control_fsm.sv. 7/7 testbench checks pass.
+B3. Prefill tiling policy
+  Prefill is sequence-tiled with a fixed tile length of 64 tokens.
+  Prompt tokens are processed tile by tile until the full prompt is consumed.
+  Attention-score and softmax working sets are computed one sequence tile at a time.
+  HBM layout for prompt-dependent tensors is fixed as:
+    - activations: [token][feature]
+    - KV cache: [layer][kv_head][token][head_dim]
+  HBM layout for weight tensors is fixed as:
+    [layer][tensor][output_channel][input_channel_tile]
+  with output channels contiguous to match per-output-channel quantization.
 
-C4. 8-lane parallel MAC array (Rijul)
-  INT8 x INT8 → INT32, 8 lanes in parallel. combinational mac_unit inside
-  registered mac_array.
-  Status: IMPLEMENTED. 7/7 testbench checks pass against Satyarth's test vectors.
+B4. Sampling feature set
+  The initial implementation performs greedy argmax only.
+  Top-k and top-p are excluded from the first hardware implementation.
+  The token emitted by the FPGA is always the argmax token id from the final logits.
 
-C5. Behavioral BRAM stubs in top.sv (Samarth)
-  Register arrays used as combinational BRAM models for simulation. FSM registered
-  address output provides one-cycle pipeline alignment.
-  Status: IMPLEMENTED in top.sv. 4/4 integration testbench checks pass.
+B5. HLS vs RTL partition for non-linear blocks
+  SystemVerilog RTL implements:
+    - prefill/decode controller
+    - GEMM engine
+    - requantization
+    - residual add
+    - embedding address generation
+    - KV-cache address/control logic
+    - HBM read/write scheduling
+    - RoPE datapath using precomputed sin/cos tables
+    - LM-head tiling
+    - greedy argmax
+  HLS C++ implements:
+    - RMSNorm
+    - softmax
+    - SiLU
+  HLS math uses fixed-point approximations.
+  Vendor floating-point or math IP is not part of the initial implementation.
 
-C6. Host-side write ports for preloading (Samarth)
-  top.sv exposes x_wr_en/addr/data and w_wr_en/row/col/data for testbench and
-  eventually Om's PCIe interface.
-  Status: IMPLEMENTED.
+B6. HBM channel allocation
+  The U55C memory plan uses 32 HBM pseudo-channels, PC00-PC31.
+  Allocation is fixed as:
+    - PC00-PC15: decoder-layer weights
+    - PC16-PC17: token embeddings, final RMSNorm gamma, quantization metadata
+    - PC18-PC21: LM-head weights
+    - PC22-PC25: K cache
+    - PC26-PC29: V cache
+    - PC30: generated-token ring buffer, host command block, status block
+    - PC31: debug capture buffer
+  Decoder-layer weights are striped across PC00-PC15 by output-channel tile.
+  LM-head weights are striped across PC18-PC21 by vocab tile.
+  K and V caches are striped across their assigned PCs by layer and KV head.
 
-C7. INT8 x INT8 arithmetic, INT32 accumulation
-  All weight and activation data is quantized to INT8 by Satyarth's model.py.
-  Accumulation in INT32 to avoid overflow.
-  Status: IMPLEMENTED and verified.
+B7. Stop-condition ownership
+  The FPGA owns the decode loop stop conditions.
+  The FPGA stops generation on the first occurrence of either:
+    - emitted token == EOS
+    - generated token count == max_new_tokens
+  The host launches generation, polls status, and reads completed token ids.
+  The host does not drive one token at a time in the production runtime path.
 
-C8. Static quantization scales (Satyarth)
-  model.py computes per-tensor scales offline. gen_test_vectors.py outputs
-  sim/x.txt, w.txt, expected.txt for hardware verification.
-  Status: IMPLEMENTED (Satyarth). Test vectors generated and verified.
+B8. Debug / observability contract
+  Debug capture is optional and disabled in performance builds.
+  When enabled, debug data is written into the dedicated HBM debug buffer on PC31.
+  The exported tensors are fixed to:
+    - layer input activation slice
+    - quantized Q slice
+    - quantized K slice
+    - quantized V slice
+    - attention-score window
+    - post-softmax window
+    - updated K-cache row
+    - updated V-cache row
+    - layer output activation slice
+    - final hidden-state slice
+    - logits top-16 slice
+    - chosen token id
+    - quantization scales used by the captured block
+  Captures are layer-scoped or decode-step-scoped, not full unbounded traces.
+  Debug data is read back by the host after the selected step completes.
+
+---
+
+SECTION C - REUSABLE BUILDING BLOCKS ALREADY IMPLEMENTED
+========================================================
+
+C1. Output-stationary accumulation
+  Each MAC lane holds its accumulator across the full K loop.
+  Status: implemented in control_fsm.sv + mac_array.sv for the validation core.
+
+C2. Tile size T = 8 validation configuration
+  One tile = 8 output elements in the simulation path.
+  Status: implemented and verified for the validation core.
+
+C3. FSM state pattern IDLE -> LOAD -> COMPUTE -> WRITE -> (LOAD | DONE)
+  LOAD absorbs BRAM latency; mac_valid stays low outside COMPUTE.
+  Status: implemented in the current validation FSM.
+
+C4. 8-lane INT8 MAC array
+  INT8 x INT8 -> INT32, 8 lanes in parallel.
+  Status: implemented and verified against test vectors.
+
+C5. Behavioral BRAM stubs in top.sv
+  Used for simulation and early integration.
+  Status: implemented.
+
+C6. Host-side preload/write ports
+  Current top.sv exposes write ports for x and w buffers for testbench / XRT use.
+  Status: implemented as reusable infrastructure.
+
+C7. Offline quantization and test-vector generation
+  model.py and gen_test_vectors.py compute static scales and simulation vectors.
+  Status: implemented and still relevant to the full design.
+
+C8. Phase 1 artifacts remain validation infrastructure
+  The old single-token, reduced-dimension flow remains useful for unit testing and
+  simulation speed, but it is no longer the architecture definition for the final design.
 
 ---
 

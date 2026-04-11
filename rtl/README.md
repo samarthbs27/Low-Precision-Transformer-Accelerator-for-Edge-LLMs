@@ -60,15 +60,15 @@ Exposes write ports (`x_wr_en/addr/data`, `w_wr_en/row/col/data`) for the testbe
 ## Running the Testbenches
 
 All commands run from the **project root** (one level above `rtl/`).  
-Output VCD files land in `sim/`.
+Replace `<build-output>.vvp` below with any local simulator output filename you want to use.
 
 ### 1. FSM testbench — `tb_control_fsm.sv`
 
 Tests the control FSM in isolation. No external files needed.
 
 ```bash
-iverilog -g2012 -o sim/fsm.vvp rtl/control_fsm.sv rtl/tb_control_fsm.sv
-vvp sim/fsm.vvp
+iverilog -g2012 -o <build-output>.vvp rtl/control_fsm.sv rtl/tb_control_fsm.sv
+vvp <build-output>.vvp
 ```
 
 Checks:
@@ -99,8 +99,8 @@ PASS check 7: done de-asserted, FSM back to IDLE
 Tests `top.sv` (FSM + MAC array end-to-end). No external files needed.
 
 ```bash
-iverilog -g2012 -o sim/top.vvp rtl/mac_unit.sv rtl/mac_array.sv rtl/control_fsm.sv rtl/top.sv rtl/tb_top.sv
-vvp sim/top.vvp
+iverilog -g2012 -o <build-output>.vvp rtl/mac_unit.sv rtl/mac_array.sv rtl/control_fsm.sv rtl/top.sv rtl/tb_top.sv
+vvp <build-output>.vvp
 ```
 
 Checks:
@@ -123,8 +123,8 @@ ALL CHECKS PASSED — 0 errors
 ### 3. MAC array testbench — `tb_mac_array.sv` *(requires Satyarth's test vectors)*
 
 ```bash
-iverilog -g2012 -o sim/mac_array.vvp rtl/mac_unit.sv rtl/mac_array.sv rtl/tb_mac_array.sv
-vvp sim/mac_array.vvp
+iverilog -g2012 -o <build-output>.vvp rtl/mac_unit.sv rtl/mac_array.sv rtl/tb_mac_array.sv
+vvp <build-output>.vvp
 ```
 
 Requires `sim/x.txt`, `sim/w.txt`, `sim/expected.txt`. These are already generated in `sim/`.  

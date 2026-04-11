@@ -1,6 +1,27 @@
 # Docs
 
-Design documentation for the FPGA Transformer Decoder Accelerator.
+Design documentation for the TinyLlama U55C FPGA inference accelerator.
+
+---
+
+## Read First
+
+1. `design_decisions.txt`
+   The implementation spec. This is the source of truth for model dimensions,
+   quantization policy, control ownership, HBM allocation, and FPGA/host behavior.
+
+2. `block_diagram.drawio`
+   The editable system diagram. This shows the post-Phase-1 TinyLlama architecture:
+   host launch, on-chip prefill/decode controller, reused decoder-layer engine,
+   HBM weights + KV cache, final RMSNorm, LM head, and greedy argmax.
+
+3. `block_diagram.md`
+   The textual companion to the diagram. Section 2 explains the full TinyLlama
+   prefill/decode architecture. Section 1 documents the existing GEMM validation core.
+
+4. `theory.md`
+   Mathematical background for the transformer blocks, INT8 quantization, and
+   hardware mapping concepts.
 
 ---
 
@@ -8,27 +29,26 @@ Design documentation for the FPGA Transformer Decoder Accelerator.
 
 | File | Description |
 |------|-------------|
-| `block_diagram.md` | Full transformer pipeline signal tables + GEMM engine detail: FSM state diagram, per-block signal tables, tiling strategy, memory layout, cycle trace |
-| `block_diagram.png` | Exported PNG of the full transformer decoder layer architecture |
-| `design_decisions.txt` | All conservative design decisions made, open decisions needing team discussion, and implemented decisions |
-| `theory.md` | Theory behind the hardware: transformer decoder layer math, INT8 quantization, tiling, output-stationary dataflow, full pipeline diagram |
+| `design_decisions.txt` | Finalized implementation decisions for the TinyLlama U55C accelerator |
+| `block_diagram.drawio` | Editable system architecture diagram; source of truth for the visual dataflow |
+| `block_diagram.md` | System-level architecture explanation plus legacy GEMM-engine details |
+| `block_diagram.png` | Exported image artifact of the block diagram; may lag behind the `.drawio` source |
+| `theory.md` | Transformer and quantization theory reference |
 | `ClassProject_RC19_Milestone3.pdf` | Milestone 3 specification sheet |
-| `Milestone2.pdf` / `.png` | Milestone 2 specification sheet |
+| `Milestone2.pdf` / `Milestone2.png` | Milestone 2 materials |
 
 ---
 
-## Key Documents
+## Current Architecture Summary
 
-### `block_diagram.png`
-The main architecture reference. Shows the complete on-chip transformer decoder layer pipeline:
-QKV projections → attention scores → softmax → weighted sum → W_O projection → residual add → layer norm → FFN → activation → FFN2 → residual add → layer norm 2.
-Color-coded by block type (green = shared MAC array, red = dedicated new hardware, orange = shared compute resources).
+- Model target: TinyLlama 1.1B
+- Runtime: prompt prefill followed by autoregressive decode
+- Control split: host launches and reads back results; FPGA executes embedding lookup, 22-layer inference, KV-cache management, final RMSNorm, LM head, and greedy argmax
+- Quantization: INT8 GEMMs with INT32 accumulation; RMSNorm, RoPE, softmax, and final RMSNorm stay higher precision
+- Memory model: U55C HBM stores weights, KV cache, and debug buffers; BRAM/URAM hold active tiles and partial sums
 
-### `theory.md`
-Explains what the hardware computes and why it is designed the way it is. Covers the full decoder layer math, INT8 quantization, the tiling loop, output-stationary dataflow, and how the four team members' work fits together.
+---
 
-### `block_diagram.md`
-Two-section document. Section 2 (full transformer pipeline): inter-block signal tables for all stages (input buffer, shared MAC array, re-quantize, softmax, SiLU+multiply, residual adders ×2, RMSNorm ×2, output buffer) using TinyLlama-correct block names (RMSNorm not LayerNorm, SwiGLU not 2-layer FFN). Section 1 (GEMM engine): FSM signal tables, BRAM addressing, tiling strategy, and cycle-by-cycle trace.
+## Important Note
 
-### `design_decisions.txt`
-Three sections: (A) conservative decisions made to unblock RTL and documentation, (B) open decisions requiring team discussion, (C) implemented decisions. Updated when decisions change.
+If this directory contains conflicting statements, `design_decisions.txt` is the authority to follow for implementation.
