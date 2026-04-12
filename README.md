@@ -52,6 +52,8 @@ Project/
   docs/
     README.md
     design_decisions.txt
+    modules.md
+    implementation_checklist.md
     block_diagram.drawio
     block_diagram.md
     block_diagram.png
@@ -64,6 +66,16 @@ Project/
     gen_test_vectors.py
   rtl/
     README.md
+    common/
+      tinyllama_pkg.sv
+      tinyllama_bus_pkg.sv
+      stream_fifo.sv
+      skid_buffer.sv
+      descriptor_fifo.sv
+    tb/
+      README.md
+      tb_stream_fifo.sv
+      tb_descriptor_fifo.sv
     control_fsm.sv
     top.sv
     mac_unit.sv
@@ -71,6 +83,11 @@ Project/
     tb_control_fsm.sv
     tb_top.sv
     tb_mac_array.sv
+  hls/
+    README.md
+    common/
+      fixed_types.hpp
+      stream_utils.hpp
   sim/
 ```
 
@@ -105,6 +122,7 @@ Project/
 
 - `model/` contains the TinyLlama software reference and the GEMM-only INT8 analysis/generation bridge.
 - `rtl/` contains the existing validation core for the shared GEMM engine and control FSM.
+- `rtl/common/`, `rtl/tb/`, and `hls/common/` now contain the verified Phase 0 production foundation.
 - `docs/` now describe the full TinyLlama prefill/decode accelerator that the project is building toward.
 
 The current RTL is still validation infrastructure; the finalized system architecture is documented in `docs/`.

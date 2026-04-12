@@ -79,5 +79,5 @@ This test expects local vector files under `sim/`.
 
 ## Where To Look Next
 
-- For production testbenches, see [rtl/tb/README.md](/c:/Users/samar/OneDrive/Desktop/Reconfigureable%20Computing/Project/rtl/tb/README.md).
-- For HLS common utilities and header-only smoke checks, see [hls/README.md](/c:/Users/samar/OneDrive/Desktop/Reconfigureable%20Computing/Project/hls/README.md).
+- For production testbenches, see [rtl/tb/README.md](tb/README.md).
+- For HLS common utilities and header-only smoke checks, see [hls/README.md](../hls/README.md).
