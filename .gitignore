@@ -12,6 +12,10 @@ docs/Milestone3_Progress_Report.docx
 # Simulation outputs
 sim/*.vvp
 sim/*.vcd
+sim/*.log
+sim/*.jou
+sim/*.wdb
+sim/*_smoke.cpp
 
 # Python cache
 __pycache__/

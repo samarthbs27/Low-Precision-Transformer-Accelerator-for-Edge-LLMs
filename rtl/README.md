@@ -1,144 +1,83 @@
-# RTL — Low-Precision Transformer Accelerator
+# RTL
 
-SystemVerilog implementation of a tiled INT8 matrix-vector engine: `y = W * x`.  
-Target: Xilinx Alveo U55C. Simulator: Icarus Verilog (`iverilog -g2012`).
+This folder contains two kinds of SystemVerilog code:
 
----
+- legacy validation RTL at the root of `rtl/`
+- new production TinyLlama RTL under subfolders such as `rtl/common/`, `rtl/control/`, and later `rtl/memory/`, `rtl/compute/`, `rtl/nonlinear/`, and `rtl/top/`
 
-## Files
+The new production path should use the subfolder-based code. The flat root-level files are still useful as references and validation scaffolding, but they are not the final TinyLlama runtime.
 
-| File | Owner | Description |
-|------|-------|-------------|
-| `control_fsm.sv` | Samarth | Tiling and dataflow control FSM |
-| `top.sv` | Samarth | Top-level integration: FSM + MAC array + BRAM stubs |
-| `mac_array.sv` | Rijul | 8-lane parallel MAC array with accumulators |
-| `mac_unit.sv` | Rijul | Single combinational INT8×INT8→INT32 MAC unit |
-| `tb_control_fsm.sv` | Samarth | FSM-only testbench (7 checks, no external files needed) |
-| `tb_top.sv` | Samarth | Integration testbench (4 checks, no external files needed) |
-| `tb_mac_array.sv` | Rijul | MAC array testbench (requires test vectors from Satyarth) |
+## Production Foundation
 
----
+These are the first production RTL files that now exist.
 
-## Module Overview
+| File | What it is | Smoke test |
+|------|------------|------------|
+| `common/tinyllama_pkg.sv` | Shared architectural constants, widths, tiling parameters, and enums for the TinyLlama accelerator. | Syntax-check it together with the dependent common files using the package compile command below. |
+| `common/tinyllama_bus_pkg.sv` | Shared packed bus, descriptor, and sideband tag types used across the production RTL. | Syntax-check it together with the dependent common files using the package compile command below. |
+| `common/stream_fifo.sv` | Parameterized ready/valid FIFO primitive used at elastic datapath boundaries. | Run `rtl/tb/tb_stream_fifo.sv`. |
+| `common/skid_buffer.sv` | Two-entry skid buffer built on top of `stream_fifo.sv` for short backpressure absorption. | Covered by the common syntax check; no standalone testbench yet. |
+| `common/descriptor_fifo.sv` | Descriptor-oriented FIFO wrapper used for command and DMA-style queues. | Run `rtl/tb/tb_descriptor_fifo.sv`. |
 
-### `mac_unit.sv`
-Purely combinational. Computes one INT8×INT8 multiply-accumulate:
-```
-acc_out = acc_in + (a * b)
-```
-Inputs `a`, `b` are signed 8-bit. Output `acc_out` is signed 32-bit.
+### Common Package Smoke Test
 
-### `mac_array.sv`
-Instantiates 8 `mac_unit`s in parallel (one per lane). Each lane holds a 32-bit accumulator. Control signals:
-- `mac_valid` HIGH → all 8 lanes accumulate this cycle
-- `clear_acc` HIGH → all accumulators reset to zero (one-cycle pulse, before each tile)
-- `wr_en` HIGH → write all 8 accumulators to the output buffer (one-cycle pulse, after each tile)
+Run this from the project root:
 
-### `control_fsm.sv`
-Drives the MAC array through a tiled matrix-vector multiply. FSM states:
-
-```
-IDLE → LOAD → COMPUTE → WRITE → LOAD → ... → DONE → IDLE
+```powershell
+iverilog -g2012 -t null `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/common/stream_fifo.sv `
+  rtl/common/skid_buffer.sv `
+  rtl/common/descriptor_fifo.sv
 ```
 
-- **IDLE**: waits for `start` pulse
-- **LOAD**: presents BRAM read addresses, fires `clear_acc`, waits `LOAD_LAT` cycles
-- **COMPUTE**: asserts `mac_valid` every cycle, increments `k_idx` (0 → K−1)
-- **WRITE**: asserts `wr_en` for one cycle to commit tile results
-- **DONE**: asserts `done` for one cycle, returns to IDLE
+This is the quickest syntax/integration check for the current production common layer.
 
-Parameters: `N` (output dim), `K` (input dim), `T` (tile size = lanes), `LOAD_LAT` (BRAM latency).  
-Defaults: N=64, K=64, T=8, LOAD_LAT=2 → 8 tiles × 64 cycles = 512 MAC cycles per run.
+When a command in this folder produces simulator output, waveform dumps, or logs, put them under `sim/`.
 
-### `top.sv`
-Wires `control_fsm` → `mac_array` with behavioral register arrays as BRAM stubs.  
-BRAM reads are **combinational** — the FSM's registered address outputs provide the required one-cycle pipeline alignment.  
-Exposes write ports (`x_wr_en/addr/data`, `w_wr_en/row/col/data`) for the testbench to preload memories.
+## Legacy Validation Files
 
----
+These root-level files are older validation infrastructure. They are still useful, but they do not define the final TinyLlama production architecture.
 
-## Running the Testbenches
+| File | What it is | Smoke test |
+|------|------------|------------|
+| `control_fsm.sv` | Legacy tiled matrix-vector control FSM. | Run `tb_control_fsm.sv`. |
+| `top.sv` | Legacy top-level wrapper connecting the FSM to the MAC array and BRAM stubs. | Run `tb_top.sv`. |
+| `mac_array.sv` | Legacy 8-lane INT8 MAC array with accumulators. | Run `tb_mac_array.sv` or `tb_top.sv`. |
+| `mac_unit.sv` | Legacy single-lane combinational INT8 multiply-accumulate unit. | Covered by `tb_mac_array.sv` and `tb_top.sv`. |
+| `tb_control_fsm.sv` | Legacy FSM-only testbench. | See command below. |
+| `tb_top.sv` | Legacy end-to-end top-level testbench. | See command below. |
+| `tb_mac_array.sv` | Legacy MAC-array testbench that uses generated vectors. | See command below. |
 
-All commands run from the **project root** (one level above `rtl/`).  
-Replace `<build-output>.vvp` below with any local simulator output filename you want to use.
+### Legacy Smoke Tests
 
-### 1. FSM testbench — `tb_control_fsm.sv`
+All commands below run from the project root.
 
-Tests the control FSM in isolation. No external files needed.
+FSM-only smoke test:
 
-```bash
-iverilog -g2012 -o <build-output>.vvp rtl/control_fsm.sv rtl/tb_control_fsm.sv
-vvp <build-output>.vvp
+```powershell
+iverilog -g2012 -o sim/tb_control_fsm.vvp rtl/control_fsm.sv rtl/tb_control_fsm.sv
+vvp sim/tb_control_fsm.vvp
 ```
 
-Checks:
-1. `mac_valid` LOW in IDLE before start
-2. `mac_valid` LOW during WRITE
-3. `clear_acc` pulses exactly 8 times (once per tile)
-4. `wr_en` pulses exactly 8 times (once per tile)
-5. `wr_addr` increments 0 → 7 correctly
-6. `done` asserts after all tiles complete
-7. `done` de-asserts next cycle (FSM returns to IDLE)
+Legacy top-level smoke test:
 
-Expected output:
-```
-PASS check 1: mac_valid LOW in IDLE
-PASS check 5: tile 0 wr_addr=0
-...
-PASS check 3: clear_acc pulsed 8 times
-PASS check 4: wr_en pulsed 8 times
-PASS check 1b: mac_valid asserted 512 cycles
-PASS check 6: done asserted after 538 cycles
-PASS check 7: done de-asserted, FSM back to IDLE
+```powershell
+iverilog -g2012 -o sim/tb_top.vvp rtl/mac_unit.sv rtl/mac_array.sv rtl/control_fsm.sv rtl/top.sv rtl/tb_top.sv
+vvp sim/tb_top.vvp
 ```
 
----
+Legacy MAC-array smoke test:
 
-### 2. Integration testbench — `tb_top.sv`
-
-Tests `top.sv` (FSM + MAC array end-to-end). No external files needed.
-
-```bash
-iverilog -g2012 -o <build-output>.vvp rtl/mac_unit.sv rtl/mac_array.sv rtl/control_fsm.sv rtl/top.sv rtl/tb_top.sv
-vvp <build-output>.vvp
+```powershell
+iverilog -g2012 -o sim/tb_mac_array.vvp rtl/mac_unit.sv rtl/mac_array.sv rtl/tb_mac_array.sv
+vvp sim/tb_mac_array.vvp
 ```
 
-Checks:
-1. **All-ones**: `x=[1…1]`, `W=all 1s` → `y[i]=64` for all i
-2. **Identity**: `W=I`, `x[k]=k` → `y[i]=i`
-3. `done` de-asserts after one cycle
-4. Second `start` pulse produces identical results (no stale state)
+This test expects local vector files under `sim/`.
 
-Expected output:
-```
-PASS CHECK_1: all 64 outputs == 64
-PASS CHECK_2: identity test — all y[i] == x[i]
-PASS CHECK_3: done de-asserted correctly
-PASS CHECK_4: second run matches
-ALL CHECKS PASSED — 0 errors
-```
+## Where To Look Next
 
----
-
-### 3. MAC array testbench — `tb_mac_array.sv` *(requires Satyarth's test vectors)*
-
-```bash
-iverilog -g2012 -o <build-output>.vvp rtl/mac_unit.sv rtl/mac_array.sv rtl/tb_mac_array.sv
-vvp <build-output>.vvp
-```
-
-Requires `sim/x.txt`, `sim/w.txt`, `sim/expected.txt`. These are already generated in `sim/`.  
-To regenerate: run `py -3.13 model/gen_test_vectors.py` from the project root.
-
----
-
-## Known Icarus Warnings (benign)
-
-These appear on every compile and can be ignored:
-
-```
-warning: Static variable initialization requires explicit lifetime in this context.
-sorry: Case unique/unique0 qualities are ignored.
-```
-
-The `unique case` qualifier is a synthesis hint — not supported by Icarus but has no effect on simulation correctness.
+- For production testbenches, see [rtl/tb/README.md](/c:/Users/samar/OneDrive/Desktop/Reconfigureable%20Computing/Project/rtl/tb/README.md).
+- For HLS common utilities and header-only smoke checks, see [hls/README.md](/c:/Users/samar/OneDrive/Desktop/Reconfigureable%20Computing/Project/hls/README.md).
