@@ -130,6 +130,9 @@ Common payload types:
 - `scale_bus`: quantization scales and metadata
 - `dbg_bus`: debug capture payloads
 
+`scale_bus` carries 16 unsigned Q16.16 scale multipliers per tile. Each scale
+entry applies to one 32-lane bank slice of the 512-lane datapath.
+
 Common tag fields:
 
 - `layer_id`
@@ -731,6 +734,11 @@ hardware implementation.
   - INT8 stream
 - Parallelism:
   - vector-lane elementwise requantization.
+- Numeric contract:
+  - scale payload format is unsigned Q16.16
+  - one scale entry applies to one 32-lane bank slice
+  - rounding mode is round-to-nearest-even
+  - signed clamp range is `[-127, 127]`
 
 #### M32. `elementwise_mul.sv`
 
@@ -1274,3 +1282,27 @@ The following choices are now fixed and no longer treated as open items:
 
 If any of the fixed choices above are intentionally changed, this file must be
 updated before RTL or HLS code diverges from the documented contract.
+
+---
+
+## 11. Verification Trace Policy
+
+Trace-backed verification follows `golden_trace_plan.md`.
+
+The policy is fixed as:
+
+1. Phase 0, Phase 1, and Phase 2
+   - Directed smoke tests are mandatory.
+   - Golden traces are not required.
+
+2. Phase 3
+   - Directed smoke tests remain mandatory.
+   - Golden traces are recommended for arithmetic-heavy blocks such as
+     `shared_gemm_engine.sv` and `requantize_unit.sv`.
+
+3. Phase 4, Phase 5, and Phase 6
+   - Every math or dataflow block must gain at least one trace-backed test.
+
+4. Phase 7, Phase 8, and Phase 9
+   - Integration must be checked against exported decoder-layer, prefill/decode,
+     and LM-head traces before the phase is treated as hardened.

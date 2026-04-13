@@ -123,6 +123,9 @@ A10. Quantization scale policy
   Quantization is symmetric INT8 with zero_point = 0 everywhere.
   Weight quantization: static per-output-channel scales.
   Activation quantization: static per-tensor scales per block output.
+  RTL-visible scale payload format: unsigned Q16.16 multipliers.
+  Requantization scale distribution: one scale entry per 32-lane bank slice.
+  A full 512-lane activation tile therefore consumes 16 scale entries.
   KV-cache quantization: static per-layer, per-KV-head scales, stored separately
   for K and V.
   Calibration is performed offline from the TinyLlama reference path.
@@ -373,6 +376,18 @@ B11. Internal DMA descriptor contract
     - tile_id
   `byte_count` is fixed to 32 bits because full KV-cache transfers can exceed
   65535 bytes.
+
+B12. Verification policy and golden-trace usage
+  Directed smoke tests remain mandatory for control, routing, DMA, and storage
+  modules.
+  Golden traces are not required for Phase 0, Phase 1, or Phase 2.
+  Golden traces are recommended for Phase 3 arithmetic blocks.
+  Golden traces are required from Phase 4 onward for math/dataflow blocks and
+  are required for Phase 7-9 integration gates.
+  The golden-trace export and consumption rules are defined in:
+    docs/golden_trace_plan.md
+  The canonical export root is fixed to:
+    sim/golden_traces/
 
 ---
 

@@ -54,6 +54,7 @@ Project/
     design_decisions.txt
     modules.md
     implementation_checklist.md
+    golden_trace_plan.md
     block_diagram.drawio
     block_diagram.md
     block_diagram.png
@@ -91,6 +92,14 @@ Project/
       scale_metadata_store.sv
       tile_buffer_bank.sv
       kv_cache_manager.sv
+    compute/
+      mac_lane.sv
+      accumulator_bank.sv
+      requantize_unit.sv
+      shared_gemm_engine.sv
+      gemm_operand_router.sv
+      gemm_result_router.sv
+      gemm_op_scheduler.sv
     tb/
       README.md
       tb_stream_fifo.sv
@@ -108,6 +117,13 @@ Project/
       tb_kv_cache_dma_reader.sv
       tb_kv_cache_dma_writer.sv
       tb_embedding_lmhead_dma_reader.sv
+      tb_mac_lane.sv
+      tb_accumulator_bank.sv
+      tb_requantize_unit.sv
+      tb_shared_gemm_engine.sv
+      tb_gemm_operand_router.sv
+      tb_gemm_result_router.sv
+      tb_gemm_op_scheduler.sv
     control_fsm.sv
     top.sv
     mac_unit.sv
@@ -142,6 +158,9 @@ Project/
 - [docs/implementation_checklist.md](docs/implementation_checklist.md)
   File-by-file coding plan for the new TinyLlama RTL/HLS implementation, including dependencies, stub order, and first verification targets.
 
+- [docs/golden_trace_plan.md](docs/golden_trace_plan.md)
+  Real-model trace export and verification policy, including when trace-backed tests become mandatory.
+
 - [model/README.md](model/README.md)
   Software reference path, TinyLlama NumPy inference, and GEMM-only INT8 bridge.
 
@@ -157,6 +176,7 @@ Project/
 - `rtl/common/`, `rtl/tb/`, and `hls/common/` now contain the verified Phase 0 production foundation.
 - `rtl/control/` now contains the verified Phase 1 control-plane skeleton, including the PC30 command/status manager stub.
 - `rtl/memory/` now contains the hardened Phase 2 memory/DMA/buffer layer, including verified router, prompt I/O, generated-token I/O, multi-beat weight/KV readers, buffered KV writeback, scale-store, KV-address, and tile-buffer smoke tests.
+- `rtl/compute/` now contains the hardened Phase 3 shared GEMM compute layer, including the MAC leaf, accumulator bank, bank-scaled requantizer, shared engine, operand/result routers, and deterministic GEMM scheduler.
 - `docs/` now describe the full TinyLlama prefill/decode accelerator that the project is building toward.
 
 The current RTL is still validation infrastructure; the finalized system architecture is documented in `docs/`.

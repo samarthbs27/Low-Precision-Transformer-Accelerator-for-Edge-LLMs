@@ -21,6 +21,8 @@ This file is intentionally execution-oriented. It answers:
 - what each file depends on
 - how each file is first verified
 
+Trace-backed verification policy is defined in `golden_trace_plan.md`.
+
 ---
 
 ## 1. Implementation Rules
@@ -42,6 +44,11 @@ This file is intentionally execution-oriented. It answers:
 - Each phase below has explicit entry and exit criteria.
 - If a file name here conflicts with a later code change, `modules.md` and this
   checklist must be updated before implementation drifts.
+- Directed smoke tests are mandatory for control and plumbing modules.
+- Golden traces are not a gate for Phase 0, Phase 1, or Phase 2.
+- Golden traces are recommended for Phase 3 arithmetic blocks.
+- Golden traces are required from Phase 4 onward for math/dataflow blocks and
+  for Phase 7-9 integration gates.
 
 ---
 
@@ -343,17 +350,18 @@ Exit criteria:
 | 8.4 | `rtl/control/prefill_decode_controller.sv` | RTL update | Promote from state stub to real runtime controller | host/status, layer controller, stop unit | real state sequencing | prefill/decode smoke TB |
 | 8.5 | `rtl/control/host_cmd_status_mgr.sv` | RTL update | Promote from descriptor stub to real command/status path | router, FIFOs | real status updates | top-level smoke TB |
 
-## Phase 9 - Verification Collateral And Golden Vectors
+## Phase 9 - Verification Collateral And Golden Traces
 
 Exit criteria:
 
-- software can export deterministic vectors for RTL/HLS tests
+- software can export deterministic traces for RTL/HLS tests
 - debug capture contract is testable
 - each major module has at least one directed test path
+- trace-backed acceptance follows `golden_trace_plan.md`
 
 | Order | File | Type | Purpose | Depends on | First pass | First verification |
 |---|---|---|---|---|---|---|
-| 9.1 | `model/export_fpga_vectors.py` | Python support | Exports directed vectors for GEMM, RMSNorm, softmax, RoPE, one decoder layer, and LM-head | existing TinyLlama model scripts | prompt-independent vector export script | run locally and inspect generated files |
+| 9.1 | `model/export_fpga_vectors.py` | Python support | Exports deterministic TinyLlama golden traces for GEMM, RMSNorm, softmax, RoPE, one decoder layer, LM-head, and runtime smoke cases | existing TinyLlama model scripts, `golden_trace_plan.md` | prompt-independent trace export script | run locally and inspect generated files under `sim/golden_traces/` |
 | 9.2 | `rtl/tb/tb_requantize_unit.sv` | TB | Directed arithmetic verification for requantization | requantize unit | compare against exported vectors | run local simulation |
 | 9.3 | `rtl/tb/tb_shared_gemm_engine.sv` | TB | Directed GEMM tile verification | GEMM core | compare against exported vectors | run local simulation |
 | 9.4 | `rtl/tb/tb_rope_unit.sv` | TB | Directed RoPE vector verification | rope unit | compare against exported vectors | run local simulation |
@@ -374,7 +382,7 @@ This is the recommended implementation sequence in the actual coding sessions:
 7. Phase 6 embedding path, FFN leaf blocks, LM head, argmax, debug mux
 8. Phase 7 decoder-layer integration
 9. Phase 8 top-level runtime integration
-10. Phase 9 vector export and directed verification
+10. Phase 9 golden-trace export and directed verification
 
 Do not start the final top-level kernel file before Phases 1-3 compile cleanly.
 

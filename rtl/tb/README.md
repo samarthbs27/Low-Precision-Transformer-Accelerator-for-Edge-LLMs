@@ -21,6 +21,13 @@ This folder contains production TinyLlama RTL smoke tests for the new `rtl/commo
 | `tb_kv_cache_dma_reader.sv` | Directed multi-beat KV-cache reader smoke test covering descriptor handshake, V/K block tagging, and final-beat marking. | Run the `tb_kv_cache_dma_reader` command below. |
 | `tb_kv_cache_dma_writer.sv` | Directed KV-cache write smoke test covering buffered payload capture and ready/valid behavior. | Run the `tb_kv_cache_dma_writer` command below. |
 | `tb_embedding_lmhead_dma_reader.sv` | Directed multi-mode reader smoke test for embedding beat streams, LM-head weight beats, and aggregated scale metadata. | Run the `tb_embedding_lmhead_dma_reader` command below. |
+| `tb_mac_lane.sv` | Directed arithmetic smoke test for the signed INT8xINT8->INT32 MAC leaf. | Run the `tb_mac_lane` command below. |
+| `tb_accumulator_bank.sv` | Directed stateful smoke test for 512-lane accumulator clear/load/tag behavior. | Run the `tb_accumulator_bank` command below. |
+| `tb_requantize_unit.sv` | Directed arithmetic smoke test for bank-scaled Q16.16 requantization, rounding, and clamp behavior. | Run the `tb_requantize_unit` command below. |
+| `tb_shared_gemm_engine.sv` | Directed shared-engine smoke test for accumulation, snapshot emission, and output backpressure. | Run the `tb_shared_gemm_engine` command below. |
+| `tb_gemm_operand_router.sv` | Directed multi-mode router smoke test for Q, score, and weighted-sum operand selection. | Run the `tb_gemm_operand_router` command below. |
+| `tb_gemm_result_router.sv` | Directed multi-mode router smoke test for quantized outputs, raw score outputs, and raw LM-head outputs. | Run the `tb_gemm_result_router` command below. |
+| `tb_gemm_op_scheduler.sv` | Directed scheduler smoke test for the full decoder-layer GEMM order and LM-head-only schedule. | Run the `tb_gemm_op_scheduler` command below. |
 
 ## Smoke Tests
 
@@ -279,4 +286,127 @@ Expected pass string:
 
 ```text
 PASS: tb_embedding_lmhead_dma_reader
+```
+
+### `tb_mac_lane.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_mac_lane.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/compute/mac_lane.sv `
+  rtl/tb/tb_mac_lane.sv
+vvp sim/tb_mac_lane.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_mac_lane
+```
+
+### `tb_accumulator_bank.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_accumulator_bank.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/accumulator_bank.sv `
+  rtl/tb/tb_accumulator_bank.sv
+vvp sim/tb_accumulator_bank.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_accumulator_bank
+```
+
+### `tb_requantize_unit.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_requantize_unit.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/requantize_unit.sv `
+  rtl/tb/tb_requantize_unit.sv
+vvp sim/tb_requantize_unit.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_requantize_unit
+```
+
+### `tb_shared_gemm_engine.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_shared_gemm_engine.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/accumulator_bank.sv `
+  rtl/compute/shared_gemm_engine.sv `
+  rtl/tb/tb_shared_gemm_engine.sv
+vvp sim/tb_shared_gemm_engine.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_shared_gemm_engine
+```
+
+Note:
+
+The 512-lane shared-engine smoke test is the slowest local Phase 3 test under Icarus.
+
+### `tb_gemm_operand_router.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_gemm_operand_router.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/gemm_operand_router.sv `
+  rtl/tb/tb_gemm_operand_router.sv
+vvp sim/tb_gemm_operand_router.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_gemm_operand_router
+```
+
+### `tb_gemm_result_router.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_gemm_result_router.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/requantize_unit.sv `
+  rtl/compute/gemm_result_router.sv `
+  rtl/tb/tb_gemm_result_router.sv
+vvp sim/tb_gemm_result_router.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_gemm_result_router
+```
+
+### `tb_gemm_op_scheduler.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_gemm_op_scheduler.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/compute/gemm_op_scheduler.sv `
+  rtl/tb/tb_gemm_op_scheduler.sv
+vvp sim/tb_gemm_op_scheduler.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_gemm_op_scheduler
 ```

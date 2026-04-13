@@ -29,7 +29,12 @@ Design documentation for the TinyLlama U55C FPGA inference accelerator.
    implementation order, dependencies, stub-first strategy, and first
    verification target for each RTL/HLS/support file.
 
-6. `theory.md`
+6. `golden_trace_plan.md`
+   The trace-backed verification policy. This defines when real TinyLlama
+   reference traces are required, where they are exported, and how they are
+   consumed by RTL/HLS tests.
+
+7. `theory.md`
    Mathematical background for the transformer blocks, INT8 quantization, and
    hardware mapping concepts.
 
@@ -44,6 +49,7 @@ Design documentation for the TinyLlama U55C FPGA inference accelerator.
 | `block_diagram.md` | System-level architecture explanation plus legacy GEMM-engine details |
 | `modules.md` | Physical module inventory for the FPGA implementation, including RTL/HLS split and interface plan |
 | `implementation_checklist.md` | File-by-file coding plan for the TinyLlama implementation, including dependencies and verification order |
+| `golden_trace_plan.md` | Real-model golden-trace export and verification policy |
 | `block_diagram.png` | Exported image artifact of the block diagram; may lag behind the `.drawio` source |
 | `theory.md` | Transformer and quantization theory reference |
 | `ClassProject_RC19_Milestone3.pdf` | Milestone 3 specification sheet |
