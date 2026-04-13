@@ -1,6 +1,6 @@
 DESIGN DECISIONS - TinyLlama U55C Inference Accelerator
 =======================================================
-Last updated: 2026-04-12
+Last updated: 2026-04-13
 Author: Samarth (Dataflow, Tiling, Control)
 
 This file tracks the current architecture decisions for the post-Phase-1
@@ -99,6 +99,18 @@ A8. Sequence support and masking
   Decode uses query_len=1 and key_len=cache_len+1.
   Softmax is therefore a real sequence-length-dependent block, not a permanent
   passthrough stage.
+  Because the production datapath is 512 lanes wide, the score-mask path is
+  chunked as 8 query rows x 64 key columns per cycle.
+  The fixed score chunk constants are:
+    - SCORE_ROWS_PER_CHUNK = 8
+    - SCORE_K_TILE = 64
+    - SCORE_CHUNKS_PER_TILE = 2
+  Score-chunk lane packing is row-major:
+    lane = query_row_local * 64 + key_col_local
+  For score chunks, tag.elem_count represents query_row_count * 64.
+  If key_col_count < 64 at a tail chunk, the extra columns are not represented
+  via elem_count; they are explicitly forced to MASK_NEG_INF by the causal-mask
+  unit before the softmax path.
 
 A9. Mixed-precision / quantization split
   Quantized GEMM-heavy blocks:
@@ -129,6 +141,9 @@ A10. Quantization scale policy
   KV-cache quantization: static per-layer, per-KV-head scales, stored separately
   for K and V.
   Calibration is performed offline from the TinyLlama reference path.
+  RoPE preserves activation magnitude scale. The FPGA therefore uses the same
+  Q or K activation scale before and after the RoPE stage; no extra RoPE-only
+  scale metadata path exists in the production datapath.
 
 A11. Final RMSNorm, LM head, and token selection are on FPGA
   After layer 21 output, the FPGA applies final RMSNorm, performs the LM head
@@ -248,6 +263,12 @@ B5. HLS vs RTL partition for non-linear blocks
     - SiLU
   HLS math uses fixed-point approximations.
   Vendor floating-point or math IP is not part of the initial implementation.
+  RoPE is implemented in RTL over fixed 512-lane head slices of:
+    - ROPE_CHUNK_TOKENS = 8 tokens
+    - HEAD_DIM = 64 dimensions
+  RoPE ROM tables are precomputed offline into Q16.16 sine/cosine memories and
+  read by the RTL rotary datapath. The ROM contents are generated from the
+  TinyLlama reference/export path and consumed directly by synthesis/simulation.
 
 B6. HBM channel allocation
   The U55C memory plan uses 32 HBM pseudo-channels, PC00-PC31.

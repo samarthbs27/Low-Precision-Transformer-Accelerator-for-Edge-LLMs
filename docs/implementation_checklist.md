@@ -272,13 +272,14 @@ Exit criteria:
 
 - Q/K/V -> RoPE -> score -> mask path compiles
 - score tiling and head-group scheduling are represented correctly
+- RoPE and causal-mask leaves consume exported Phase 4 traces
 - attention assembly path exists even if softmax is still stubbed
 
 | Order | File | Type | Purpose | Depends on | First pass | First verification |
 |---|---|---|---|---|---|---|
-| 4.1 | `rtl/compute/rope_lut_rom.sv` | RTL | Stores RoPE sine/cosine tables | packages | ROM stub with deterministic entries | compile with rope TB |
-| 4.2 | `rtl/compute/rope_unit.sv` | RTL | Applies RoPE to Q/K tiles | packages, ROM | first pass can bypass or identity-rotate under control | `rtl/tb/tb_rope_unit.sv` |
-| 4.3 | `rtl/compute/gqa_router.sv` | RTL | Head-group routing from 4 KV heads to 32 Q heads | packages | address/tag routing stub | compile smoke with synthetic tags |
+| 4.1 | `rtl/compute/rope_lut_rom.sv` | RTL | Stores RoPE sine/cosine tables | packages | generated Q16.16 ROM with token-major head-slice expansion | compile with rope TB |
+| 4.2 | `rtl/compute/rope_unit.sv` | RTL | Applies RoPE to Q/K tiles | packages, ROM | real rotate-half INT8 datapath preserving input scale | `rtl/tb/tb_rope_unit.sv` |
+| 4.3 | `rtl/compute/gqa_router.sv` | RTL | Head-group routing from 4 KV heads to 32 Q heads | packages | real tag-rewrite and KV-head validation leaf | compile smoke with synthetic tags |
 | 4.4 | `rtl/compute/causal_mask_unit.sv` | RTL | Applies pre-softmax causal mask | packages | real compare-and-mask leaf | `rtl/tb/tb_causal_mask_unit.sv` |
 
 ## Phase 5 - Nonlinear Wrappers And HLS Kernels

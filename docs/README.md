@@ -34,7 +34,11 @@ Design documentation for the TinyLlama U55C FPGA inference accelerator.
    reference traces are required, where they are exported, and how they are
    consumed by RTL/HLS tests.
 
-7. `theory.md`
+7. `parallelism_tradeoffs.md`
+   Design rationale for where the current architecture is using FPGA
+   parallelism aggressively and where it is intentionally conservative.
+
+8. `theory.md`
    Mathematical background for the transformer blocks, INT8 quantization, and
    hardware mapping concepts.
 
@@ -50,6 +54,7 @@ Design documentation for the TinyLlama U55C FPGA inference accelerator.
 | `modules.md` | Physical module inventory for the FPGA implementation, including RTL/HLS split and interface plan |
 | `implementation_checklist.md` | File-by-file coding plan for the TinyLlama implementation, including dependencies and verification order |
 | `golden_trace_plan.md` | Real-model golden-trace export and verification policy |
+| `parallelism_tradeoffs.md` | Design-rationale note on FPGA parallelism choices and deliberate first-pass limits |
 | `block_diagram.png` | Exported image artifact of the block diagram; may lag behind the `.drawio` source |
 | `theory.md` | Transformer and quantization theory reference |
 | `ClassProject_RC19_Milestone3.pdf` | Milestone 3 specification sheet |

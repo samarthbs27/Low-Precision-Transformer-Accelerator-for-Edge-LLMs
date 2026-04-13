@@ -85,13 +85,19 @@ Its job is to:
 - export derived packed `.memh` fixtures for RTL testbenches
 - provide arithmetic trace cases that RTL and HLS testbenches can consume later
 
-The first implemented export scope is Phase 3:
-- shared GEMM engine traces
-- requantization traces
+The currently implemented export scopes are:
+- Phase 3:
+  - shared GEMM engine traces
+  - requantization traces
+- Phase 4:
+  - prefill and decode RoPE traces
+  - prefill and decode causal-mask traces
+  - generated RoPE Q16.16 ROM memh files for the RTL rotary datapath
 
 It uses the fixed GEMM lane-packing contract from the hardware docs so the
 exported traces match the production RTL interpretation of one `M_TILE x N_TILE`
-output tile.
+output tile. For Phase 4, it also uses the frozen token-major head-slice
+packing for RoPE and the fixed `8 x 64` score-chunk packing for the mask path.
 
 ## TinyLlama Configuration Used By The Scripts
 

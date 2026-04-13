@@ -28,6 +28,9 @@ This folder contains production TinyLlama RTL smoke tests for the new `rtl/commo
 | `tb_gemm_operand_router.sv` | Directed multi-mode router smoke test for Q, score, and weighted-sum operand selection. | Run the `tb_gemm_operand_router` command below. |
 | `tb_gemm_result_router.sv` | Directed multi-mode router smoke test for quantized outputs, raw score outputs, and raw LM-head outputs. | Run the `tb_gemm_result_router` command below. |
 | `tb_gemm_op_scheduler.sv` | Directed scheduler smoke test for the full decoder-layer GEMM order and LM-head-only schedule. | Run the `tb_gemm_op_scheduler` command below. |
+| `tb_rope_unit.sv` | Directed identity check plus exported Phase 4 TinyLlama trace replay for the RoPE rotary datapath. | Run the `tb_rope_unit` command below. |
+| `tb_gqa_router.sv` | Directed grouped-query routing smoke test for K-path, V-path, KV-head validation, and select-conflict handling. | Run the `tb_gqa_router` command below. |
+| `tb_causal_mask_unit.sv` | Directed mask check plus exported Phase 4 prefill/decode trace replay for the pre-softmax causal-mask leaf. | Run the `tb_causal_mask_unit` command below. |
 
 ## Smoke Tests
 
@@ -411,4 +414,72 @@ Expected pass string:
 
 ```text
 PASS: tb_gemm_op_scheduler
+```
+
+### `tb_rope_unit.sv`
+
+Before running this bench, regenerate the Phase 4 fixtures and RoPE ROM files:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase4 --layer 0 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_rope_unit.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/rope_lut_rom.sv `
+  rtl/compute/rope_unit.sv `
+  rtl/tb/tb_rope_unit.sv
+vvp sim/tb_rope_unit.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_rope_unit
+```
+
+### `tb_gqa_router.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_gqa_router.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/gqa_router.sv `
+  rtl/tb/tb_gqa_router.sv
+vvp sim/tb_gqa_router.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_gqa_router
+```
+
+### `tb_causal_mask_unit.sv`
+
+Before running this bench, regenerate the Phase 4 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase4 --layer 0 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_causal_mask_unit.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/causal_mask_unit.sv `
+  rtl/tb/tb_causal_mask_unit.sv
+vvp sim/tb_causal_mask_unit.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_causal_mask_unit
 ```

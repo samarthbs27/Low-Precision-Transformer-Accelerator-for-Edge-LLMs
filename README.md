@@ -55,6 +55,7 @@ Project/
     modules.md
     implementation_checklist.md
     golden_trace_plan.md
+    parallelism_tradeoffs.md
     block_diagram.drawio
     block_diagram.md
     block_diagram.png
@@ -162,6 +163,10 @@ Project/
 - [docs/golden_trace_plan.md](docs/golden_trace_plan.md)
   Real-model trace export and verification policy, including when trace-backed tests become mandatory.
 
+- [docs/parallelism_tradeoffs.md](docs/parallelism_tradeoffs.md)
+  Design rationale for where the current architecture is using FPGA
+  parallelism aggressively and where it is intentionally conservative.
+
 - [model/README.md](model/README.md)
   Software reference path, TinyLlama NumPy inference, and GEMM-only INT8 bridge.
 
@@ -178,7 +183,11 @@ Project/
 - `rtl/control/` now contains the verified Phase 1 control-plane skeleton, including the PC30 command/status manager stub.
 - `rtl/memory/` now contains the hardened Phase 2 memory/DMA/buffer layer, including verified router, prompt I/O, generated-token I/O, multi-beat weight/KV readers, buffered KV writeback, scale-store, KV-address, and tile-buffer smoke tests.
 - `rtl/compute/` now contains the hardened Phase 3 shared GEMM compute layer, including the MAC leaf, accumulator bank, bank-scaled requantizer, shared engine, operand/result routers, and deterministic GEMM scheduler.
-- `model/export_fpga_vectors.py` now provides the canonical golden-trace export entry point for Phase 3 arithmetic verification under `sim/golden_traces/`, including derived packed `.memh` fixtures that are consumed by the current requantize and shared-GEMM testbenches.
+- `rtl/compute/` now also contains the concrete Phase 4 attention-path leaves: the generated RoPE ROM, the real rotary datapath, the GQA router, and the pre-softmax causal-mask unit.
+- `model/export_fpga_vectors.py` now provides the canonical golden-trace export entry point for both:
+  - Phase 3 arithmetic verification
+  - Phase 4 RoPE and causal-mask verification
+  It writes canonical traces under `sim/golden_traces/`, emits packed `.memh` fixtures for the RTL benches, and regenerates the tracked RoPE ROM memh files under `rtl/compute/`.
 - `docs/` now describe the full TinyLlama prefill/decode accelerator that the project is building toward.
 
 The current RTL is still validation infrastructure; the finalized system architecture is documented in `docs/`.

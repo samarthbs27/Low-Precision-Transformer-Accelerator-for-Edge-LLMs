@@ -654,10 +654,20 @@ hardware implementation.
 - Physical instances: 1
 - Purpose: Stores precomputed sine/cosine tables for RoPE positions.
 - Inputs / buses:
-  - position index
-  - head-dimension lane index
+  - `token_base`
+  - `token_count`
 - Outputs / buses:
-  - sine/cosine values to `rope_unit.sv`
+  - one 512-lane packed `cos` vector for an `8 x 64` RoPE slice
+  - one 512-lane packed `sin` vector for an `8 x 64` RoPE slice
+- Concrete contract:
+  - lane packing is token-major:
+    `lane = token_local * HEAD_DIM + dim_local`
+  - ROM access is structured as explicit `8 positions x 32 unique angle values`
+    per slice, then broadcast across the paired 64 dimensions
+  - token positions outside `token_count` emit identity rotation values:
+    `cos = 1.0`, `sin = 0.0`
+  - ROM contents are stored as signed `Q16.16` values loaded from generated
+    memh files
 - Parallelism:
   - parallel ROM reads across the selected vector width.
 
@@ -667,12 +677,21 @@ hardware implementation.
 - Physical instances: 1
 - Purpose: Applies RoPE to Q and K after projection and before score computation.
 - Inputs / buses:
-  - Q tile
-  - K tile
+  - Q head slice as one `8 x 64` packed activation tile
+  - K head slice as one `8 x 64` packed activation tile
   - sine/cosine values from `rope_lut_rom.sv`
 - Outputs / buses:
-  - rotated Q tile
-  - rotated K tile
+  - rotated Q head slice
+  - rotated K head slice
+- Concrete contract:
+  - lane packing is token-major:
+    `lane = token_local * HEAD_DIM + dim_local`
+  - the rotary pairing follows TinyLlama's rotate-half convention:
+    dims `0..31` pair with dims `32..63`
+  - Q and K slices supplied to one RoPE invocation must carry the same
+    `token_base`; RTL checks this in simulation
+  - the RoPE output preserves the incoming activation scale; no extra scale
+    bus is created for the rotary stage
 - Parallelism:
   - vector-lane parallel multiply/add across the active RoPE slice.
 
@@ -683,11 +702,19 @@ hardware implementation.
 - Purpose: Implements grouped-query attention routing from 4 KV heads to 32
   query-head groups without physically copying K/V tensors in HBM.
 - Inputs / buses:
-  - K tile
-  - V tile
-  - Q-head group select
+  - K slice stream
+  - V slice stream
+  - selected `q_head_id`
 - Outputs / buses:
-  - routed K/V streams to score and weighted-sum stages
+  - one routed K-or-V stream with rewritten tags for the selected query head
+  - routing error flag if the supplied KV head does not match
+    `q_head_id / KV_GROUPS`
+- Concrete contract:
+  - the selected K path emits tags for `BLOCK_SCORE` / `GEMM_SCORE`
+  - the selected V path emits tags for `BLOCK_WEIGHTED_SUM` /
+    `GEMM_WEIGHTED_SUM`
+  - the router does not replicate payload data; it validates and rewrites tags
+    only
 - Parallelism:
   - parallel fan-out by group using address reuse / replicated read pointers.
 
@@ -697,12 +724,21 @@ hardware implementation.
 - Physical instances: 1
 - Purpose: Applies the pre-softmax causal mask for both prefill and decode.
 - Inputs / buses:
-  - score tile
-  - query position range
-  - key position range
-  - mode
+  - one score chunk as `8 query rows x 64 key columns`
+  - `query_pos_base`
+  - `key_pos_base`
+  - `query_row_count`
+  - `key_col_count`
+  - `mode`
 - Outputs / buses:
   - masked score tile to `softmax_wrapper.sv`
+- Concrete contract:
+  - score-chunk lane packing is row-major:
+    `lane = query_row_local * SCORE_K_TILE + key_col_local`
+  - masked fill value is fixed to `MASK_NEG_INF = -1000000000`
+  - output `elem_count` is `query_row_count * SCORE_K_TILE`
+  - key columns beyond `key_col_count` are explicitly forced to
+    `MASK_NEG_INF` and remain inside the packed 64-column row shape
 - Parallelism:
   - elementwise compare-and-mask across one score tile.
 
@@ -1063,6 +1099,11 @@ These notes affect the design immediately because they determine:
 - Attention-score tiling is fixed to:
   - `SCORE_Q_TILE = 16`
   - `SCORE_K_TILE = 64`
+  - `SCORE_ROWS_PER_CHUNK = 8`
+  - `SCORE_CHUNKS_PER_TILE = 2`
+- RoPE head-slice tiling is fixed to:
+  - `ROPE_CHUNK_TOKENS = 8`
+  - `HEAD_DIM = 64`
 - LM-head vocabulary processing is fixed to:
   - `VOCAB_TILE = 128`
 - Prefill input tiling is fixed to `SEQ_TILE = 64`.
@@ -1073,6 +1114,11 @@ These notes affect the design immediately because they determine:
 - Inactive lanes are forced idle inside `shared_gemm_engine.sv`, and masked
   writeback suppresses invalid output elements.
 - Tile sizes are not runtime-programmable in the first implementation.
+- Score chunks use the fixed row-major lane mapping:
+  - `lane = query_row_local * SCORE_K_TILE + key_col_local`
+- For score chunks, `elem_count` represents `query_row_count * SCORE_K_TILE`.
+  Tail key columns are represented by explicit causal-mask fill, not by a
+  ragged elem-count rectangle.
 
 ### 8.5 Buffer Banking And Interleaving
 
@@ -1162,6 +1208,8 @@ These notes affect the design immediately because they determine:
   the HLS core, and emits INT8 tiles plus scale metadata for downstream stages.
 - `rope_unit.sv` uses `Q16.16` internally for rotation math and emits INT8 Q/K
   tiles for the score GEMM path.
+- RoPE preserves the existing Q or K activation scale, so the same static
+  activation scale applies before and after rotation.
 - `softmax_wrapper.sv` converts masked score tiles to `Q16.16`, invokes the HLS
   softmax core, and emits nonnegative INT8-compatible probability bytes in the
   range `[0, 127]` using fixed probability scale `1/127`.

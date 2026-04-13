@@ -45,15 +45,21 @@ package tinyllama_pkg;
   localparam int unsigned SCORE_K_TILE      = 64;
   localparam int unsigned VOCAB_TILE        = 128;
   localparam int unsigned HEAD_GROUP_PAR    = 1;
+  localparam int unsigned ROPE_CHUNK_TOKENS = GEMM_LANES / HEAD_DIM;
+  localparam int unsigned SCORE_ROWS_PER_CHUNK = GEMM_LANES / SCORE_K_TILE;
+  localparam int unsigned SCORE_CHUNKS_PER_TILE = SCORE_Q_TILE / SCORE_ROWS_PER_CHUNK;
+  localparam int unsigned ROPE_HALF_DIM     = HEAD_DIM / 2;
 
   // Common vector widths.
   localparam int unsigned ACT_VECTOR_ELEMS   = GEMM_LANES;
   localparam int unsigned WEIGHT_VECTOR_ELEMS = GEMM_LANES;
   localparam int unsigned ACC_VECTOR_ELEMS   = GEMM_LANES;
   localparam int unsigned SCORE_TILE_ELEMS   = SCORE_Q_TILE * SCORE_K_TILE;
+  localparam int unsigned SCORE_CHUNK_ELEMS  = SCORE_ROWS_PER_CHUNK * SCORE_K_TILE;
   localparam int unsigned LMHEAD_TILE_ELEMS  = VOCAB_TILE;
   localparam int unsigned SCALE_VECTOR_ELEMS = TILE_BUFFER_BANKS;
   localparam int unsigned DEBUG_BUS_W        = DMA_BEAT_W;
+  localparam logic signed [ACC_W-1:0] MASK_NEG_INF = -32'sd1000000000;
 
   // Shared ID widths.
   localparam int unsigned LAYER_ID_W    = (N_LAYERS > 1) ? $clog2(N_LAYERS) : 1;

@@ -29,6 +29,7 @@ import tinyllama_gemm_int8 as bridge
 
 
 PHASE3 = "phase3"
+PHASE4 = "phase4"
 
 M_TILE = 16
 N_TILE = 32
@@ -36,9 +37,19 @@ GEMM_LANES = 512
 SCALE_VECTOR_ELEMS = 16
 Q16_16_FRAC_BITS = 16
 K_TILE = 64
+HEAD_DIM = 64
+ROPE_CHUNK_TOKENS = 8
+ROPE_HALF_DIM = HEAD_DIM // 2
+SCORE_K_TILE = 64
+SCORE_ROWS_PER_CHUNK = 8
+MASK_NEG_INF = np.int32(-1000000000)
 
 DEFAULT_PREFILL_TOKEN_IDS = ",".join(str(i) for i in range(1, 17))
 DEFAULT_DECODE_TOKEN_IDS = "1"
+DEFAULT_PHASE4_DECODE_CONTEXT_TOKEN_IDS = DEFAULT_PREFILL_TOKEN_IDS
+
+ROPE_COS_ROM_PATH = Path("rtl/compute/rope_cos_rom.memh")
+ROPE_SIN_ROM_PATH = Path("rtl/compute/rope_sin_rom.memh")
 
 
 PHASE3_OPS = (
@@ -71,6 +82,12 @@ def q16_16_from_float(value: float) -> np.uint32:
     scaled = int(round(max(0.0, value) * float(1 << Q16_16_FRAC_BITS)))
     scaled = max(0, min(scaled, 0xFFFFFFFF))
     return np.uint32(scaled)
+
+
+def q16_16_signed_from_float(value: float) -> np.int32:
+    scaled = int(round(float(value) * float(1 << Q16_16_FRAC_BITS)))
+    scaled = max(-(1 << 31), min(scaled, (1 << 31) - 1))
+    return np.int32(scaled)
 
 
 def ensure_dir(path: Path) -> None:
@@ -534,6 +551,524 @@ def build_requant_case(
     )
 
 
+def build_rope_rom_tables(
+    *,
+    rope_theta: float,
+    source_root: Path,
+) -> tuple[np.ndarray, np.ndarray]:
+    cos_fp, sin_fp = ref.build_rope_cache(
+        seq_len=2048,
+        head_dim=HEAD_DIM,
+        rope_theta=rope_theta,
+    )
+    cos_q16 = np.vectorize(q16_16_signed_from_float, otypes=[np.int32])(cos_fp)
+    sin_q16 = np.vectorize(q16_16_signed_from_float, otypes=[np.int32])(sin_fp)
+
+    write_hex_memh(
+        source_root / ROPE_COS_ROM_PATH,
+        cos_q16[:, :ROPE_HALF_DIM].reshape(-1),
+        bits=32,
+        signed=True,
+    )
+    write_hex_memh(
+        source_root / ROPE_SIN_ROM_PATH,
+        sin_q16[:, :ROPE_HALF_DIM].reshape(-1),
+        bits=32,
+        signed=True,
+    )
+    return cos_q16, sin_q16
+
+
+def round_q16_16_sum_to_int8(sum_term: int) -> np.int8:
+    abs_sum = -sum_term if sum_term < 0 else sum_term
+    quotient_mag = abs_sum >> Q16_16_FRAC_BITS
+    remainder_bits = abs_sum & ((1 << Q16_16_FRAC_BITS) - 1)
+    rounded_mag = quotient_mag
+
+    if remainder_bits > (1 << (Q16_16_FRAC_BITS - 1)):
+        rounded_mag = quotient_mag + 1
+    elif remainder_bits == (1 << (Q16_16_FRAC_BITS - 1)) and (quotient_mag & 1):
+        rounded_mag = quotient_mag + 1
+
+    rounded_signed = -rounded_mag if sum_term < 0 else rounded_mag
+    rounded_signed = max(-127, min(127, rounded_signed))
+    return np.int8(rounded_signed)
+
+
+def apply_rope_int8_slice(
+    tile_q: np.ndarray,
+    tile_k: np.ndarray,
+    cos_q16: np.ndarray,
+    sin_q16: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    token_count = tile_q.shape[0]
+    q_rot = np.zeros_like(tile_q, dtype=np.int8)
+    k_rot = np.zeros_like(tile_k, dtype=np.int8)
+
+    for token_idx in range(token_count):
+        for dim_idx in range(HEAD_DIM):
+            if dim_idx < ROPE_HALF_DIM:
+                pair_dim = dim_idx + ROPE_HALF_DIM
+                lower_half = True
+            else:
+                pair_dim = dim_idx - ROPE_HALF_DIM
+                lower_half = False
+
+            cos_val = int(cos_q16[token_idx, dim_idx])
+            sin_val = int(sin_q16[token_idx, dim_idx])
+
+            q_curr = int(tile_q[token_idx, dim_idx])
+            q_pair = int(tile_q[token_idx, pair_dim])
+            q_sum = (q_curr * cos_val) - (q_pair * sin_val) if lower_half else (q_curr * cos_val) + (q_pair * sin_val)
+            q_rot[token_idx, dim_idx] = round_q16_16_sum_to_int8(q_sum)
+
+            k_curr = int(tile_k[token_idx, dim_idx])
+            k_pair = int(tile_k[token_idx, pair_dim])
+            k_sum = (k_curr * cos_val) - (k_pair * sin_val) if lower_half else (k_curr * cos_val) + (k_pair * sin_val)
+            k_rot[token_idx, dim_idx] = round_q16_16_sum_to_int8(k_sum)
+
+    return q_rot, k_rot
+
+
+def pack_token_major_head_tile(tile: np.ndarray) -> np.ndarray:
+    packed = np.zeros((GEMM_LANES,), dtype=np.int8)
+    token_count = min(tile.shape[0], ROPE_CHUNK_TOKENS)
+    for token_local in range(token_count):
+        lane_base = token_local * HEAD_DIM
+        packed[lane_base:lane_base + HEAD_DIM] = np.asarray(tile[token_local, :HEAD_DIM], dtype=np.int8)
+    return packed
+
+
+def pack_score_chunk(score_tile: np.ndarray) -> np.ndarray:
+    packed = np.zeros((GEMM_LANES,), dtype=np.int32)
+    row_count = min(score_tile.shape[0], SCORE_ROWS_PER_CHUNK)
+    col_count = min(score_tile.shape[1], SCORE_K_TILE)
+    for row_local in range(row_count):
+        lane_base = row_local * SCORE_K_TILE
+        packed[lane_base:lane_base + col_count] = np.asarray(score_tile[row_local, :col_count], dtype=np.int32)
+    return packed
+
+
+def build_rope_case(
+    *,
+    runtime_mode: str,
+    layer_id: int,
+    q_head_id: int,
+    kv_head_id: int,
+    token_base: int,
+    q_in_tile: np.ndarray,
+    k_in_tile: np.ndarray,
+    q_out_tile: np.ndarray,
+    k_out_tile: np.ndarray,
+    output_root: Path,
+    manifest_entries: list[dict[str, Any]],
+) -> None:
+    token_count = q_in_tile.shape[0]
+    q_in_lane = pack_token_major_head_tile(q_in_tile)
+    k_in_lane = pack_token_major_head_tile(k_in_tile)
+    q_out_lane = pack_token_major_head_tile(q_out_tile)
+    k_out_lane = pack_token_major_head_tile(k_out_tile)
+
+    case_id = f"{PHASE4}_{runtime_mode}_layer{layer_id}_rope_q{q_head_id}_kv{kv_head_id}_t{token_base}"
+    case_path = output_root / PHASE4 / f"{case_id}.npz"
+    ensure_dir(case_path.parent)
+
+    np.savez(
+        case_path,
+        q_in=q_in_tile,
+        k_in=k_in_tile,
+        q_out_expected=q_out_tile,
+        k_out_expected=k_out_tile,
+        token_base=np.asarray([token_base], dtype=np.int32),
+        token_count=np.asarray([token_count], dtype=np.int32),
+        q_head_id=np.asarray([q_head_id], dtype=np.int32),
+        kv_head_id=np.asarray([kv_head_id], dtype=np.int32),
+    )
+
+    rtl_root = output_root / PHASE4 / "rtl"
+    fixture_base = rtl_root / case_id
+    write_hex_memh(
+        fixture_base.with_suffix(".meta.memh"),
+        np.asarray([token_base, token_count, q_head_id, kv_head_id], dtype=np.uint32),
+        bits=32,
+        signed=False,
+    )
+    write_packed_lane_memh(fixture_base.with_suffix(".q_in_packed.memh"), q_in_lane, bits_per_lane=8, signed=True)
+    write_packed_lane_memh(fixture_base.with_suffix(".k_in_packed.memh"), k_in_lane, bits_per_lane=8, signed=True)
+    write_packed_lane_memh(fixture_base.with_suffix(".q_out_expected_packed.memh"), q_out_lane, bits_per_lane=8, signed=True)
+    write_packed_lane_memh(fixture_base.with_suffix(".k_out_expected_packed.memh"), k_out_lane, bits_per_lane=8, signed=True)
+
+    manifest_entries.append(
+        {
+            "case_id": case_id,
+            "phase": PHASE4,
+            "block": "rope_unit",
+            "path": str(case_path.as_posix()),
+            "runtime_mode": runtime_mode,
+            "layer_id": layer_id,
+            "token_base": token_base,
+            "token_count": token_count,
+            "q_head_id": q_head_id,
+            "kv_head_id": kv_head_id,
+            "dtype_summary": {
+                "q_in": "int8",
+                "k_in": "int8",
+                "q_out_expected": "int8",
+                "k_out_expected": "int8",
+            },
+            "shape_summary": {
+                "q_in": list(q_in_tile.shape),
+                "k_in": list(k_in_tile.shape),
+                "q_out_expected": list(q_out_tile.shape),
+                "k_out_expected": list(k_out_tile.shape),
+            },
+            "lane_packing": "token_major_head64",
+            "rtl_fixture_base": str(fixture_base.as_posix()),
+        }
+    )
+
+
+def build_causal_mask_case(
+    *,
+    runtime_mode: str,
+    layer_id: int,
+    q_head_id: int,
+    kv_head_id: int,
+    query_pos_base: int,
+    key_pos_base: int,
+    query_row_count: int,
+    key_col_count: int,
+    score_in_tile: np.ndarray,
+    score_out_tile: np.ndarray,
+    output_root: Path,
+    manifest_entries: list[dict[str, Any]],
+) -> None:
+    score_in_lane = pack_score_chunk(score_in_tile)
+    score_out_lane = pack_score_chunk(score_out_tile)
+
+    case_id = (
+        f"{PHASE4}_{runtime_mode}_layer{layer_id}_causal_mask_q{q_head_id}_"
+        f"kv{kv_head_id}_qb{query_pos_base}_kb{key_pos_base}"
+    )
+    case_path = output_root / PHASE4 / f"{case_id}.npz"
+    ensure_dir(case_path.parent)
+
+    np.savez(
+        case_path,
+        score_in=score_in_tile,
+        score_out_expected=score_out_tile,
+        query_pos_base=np.asarray([query_pos_base], dtype=np.int32),
+        key_pos_base=np.asarray([key_pos_base], dtype=np.int32),
+        query_row_count=np.asarray([query_row_count], dtype=np.int32),
+        key_col_count=np.asarray([key_col_count], dtype=np.int32),
+        q_head_id=np.asarray([q_head_id], dtype=np.int32),
+        kv_head_id=np.asarray([kv_head_id], dtype=np.int32),
+    )
+
+    rtl_root = output_root / PHASE4 / "rtl"
+    fixture_base = rtl_root / case_id
+    write_hex_memh(
+        fixture_base.with_suffix(".meta.memh"),
+        np.asarray(
+            [query_pos_base, key_pos_base, query_row_count, key_col_count, q_head_id, kv_head_id],
+            dtype=np.uint32,
+        ),
+        bits=32,
+        signed=False,
+    )
+    write_packed_lane_memh(fixture_base.with_suffix(".score_in_packed.memh"), score_in_lane, bits_per_lane=32, signed=True)
+    write_packed_lane_memh(fixture_base.with_suffix(".score_out_expected_packed.memh"), score_out_lane, bits_per_lane=32, signed=True)
+
+    manifest_entries.append(
+        {
+            "case_id": case_id,
+            "phase": PHASE4,
+            "block": "causal_mask_unit",
+            "path": str(case_path.as_posix()),
+            "runtime_mode": runtime_mode,
+            "layer_id": layer_id,
+            "query_pos_base": query_pos_base,
+            "key_pos_base": key_pos_base,
+            "query_row_count": query_row_count,
+            "key_col_count": key_col_count,
+            "q_head_id": q_head_id,
+            "kv_head_id": kv_head_id,
+            "dtype_summary": {
+                "score_in": "int32",
+                "score_out_expected": "int32",
+            },
+            "shape_summary": {
+                "score_in": list(score_in_tile.shape),
+                "score_out_expected": list(score_out_tile.shape),
+            },
+            "lane_packing": "score_chunk_row_major",
+            "mask_neg_inf": int(MASK_NEG_INF),
+            "rtl_fixture_base": str(fixture_base.as_posix()),
+        }
+    )
+
+
+def collect_phase4_attention_tensors(
+    *,
+    token_ids: list[int],
+    target_layer: int,
+    weights: ref.TinyLlamaWeights,
+    cos_rom_q16: np.ndarray,
+    sin_rom_q16: np.ndarray,
+) -> dict[str, np.ndarray]:
+    cos_local, sin_local = ref.build_rope_cache(
+        seq_len=len(token_ids),
+        head_dim=weights.cfg["head_dim"],
+        rope_theta=weights.cfg["rope_theta"],
+    )
+    layer_input = collect_layer_input(
+        weights=weights,
+        token_ids=token_ids,
+        target_layer=target_layer,
+        cos=cos_local,
+        sin=sin_local,
+    )
+    _, debug = bridge.mixed_precision_decoder_layer(
+        layer_input,
+        weights.layer(target_layer),
+        weights.cfg,
+        cos_local,
+        sin_local,
+        capture_arrays=True,
+    )
+
+    q_q, _ = bridge.quantize_int8(np.asarray(debug["attn"]["q_proj_fp"], dtype=np.float32))
+    k_q, _ = bridge.quantize_int8(np.asarray(debug["attn"]["k_proj_fp"], dtype=np.float32))
+
+    seq_count = len(token_ids)
+    q_heads = q_q.reshape(seq_count, weights.cfg["num_attention_heads"], HEAD_DIM).transpose(1, 0, 2)
+    k_heads = k_q.reshape(seq_count, weights.cfg["num_key_value_heads"], HEAD_DIM).transpose(1, 0, 2)
+
+    q_rope = np.zeros_like(q_heads, dtype=np.int8)
+    k_rope = np.zeros_like(k_heads, dtype=np.int8)
+
+    for q_head_id in range(weights.cfg["num_attention_heads"]):
+        kv_head_id = q_head_id // weights.cfg["num_key_value_groups"]
+        q_rot_tile, _ = apply_rope_int8_slice(
+            q_heads[q_head_id],
+            k_heads[kv_head_id],
+            cos_rom_q16[:seq_count, :HEAD_DIM],
+            sin_rom_q16[:seq_count, :HEAD_DIM],
+        )
+        q_rope[q_head_id] = q_rot_tile
+
+    for kv_head_id in range(weights.cfg["num_key_value_heads"]):
+        _, k_rot_tile = apply_rope_int8_slice(
+            q_heads[kv_head_id * weights.cfg["num_key_value_groups"]],
+            k_heads[kv_head_id],
+            cos_rom_q16[:seq_count, :HEAD_DIM],
+            sin_rom_q16[:seq_count, :HEAD_DIM],
+        )
+        k_rope[kv_head_id] = k_rot_tile
+
+    return {
+        "q_heads_q": q_heads,
+        "k_heads_q": k_heads,
+        "q_heads_rope_q": q_rope,
+        "k_heads_rope_q": k_rope,
+    }
+
+
+def mask_score_tile(
+    *,
+    runtime_mode: str,
+    score_in_tile: np.ndarray,
+    query_pos_base: int,
+    key_pos_base: int,
+    query_row_count: int,
+    key_col_count: int,
+) -> np.ndarray:
+    score_out_tile = np.zeros((SCORE_ROWS_PER_CHUNK, SCORE_K_TILE), dtype=np.int32)
+
+    for row_local in range(SCORE_ROWS_PER_CHUNK):
+        if row_local >= query_row_count:
+            continue
+
+        query_pos = query_pos_base + row_local
+        for col_local in range(SCORE_K_TILE):
+            key_pos = key_pos_base + col_local
+            allow = False
+            if runtime_mode in ("prefill", "decode"):
+                allow = (col_local < key_col_count) and (key_pos <= query_pos)
+
+            if allow:
+                score_out_tile[row_local, col_local] = np.int32(score_in_tile[row_local, col_local])
+            else:
+                score_out_tile[row_local, col_local] = MASK_NEG_INF
+
+    return score_out_tile
+
+
+def export_phase4_for_tokens(
+    *,
+    runtime_mode: str,
+    token_ids: list[int],
+    target_layer: int,
+    weights: ref.TinyLlamaWeights,
+    cos_rom_q16: np.ndarray,
+    sin_rom_q16: np.ndarray,
+    output_root: Path,
+    manifest_entries: list[dict[str, Any]],
+) -> None:
+    tensors = collect_phase4_attention_tensors(
+        token_ids=token_ids,
+        target_layer=target_layer,
+        weights=weights,
+        cos_rom_q16=cos_rom_q16,
+        sin_rom_q16=sin_rom_q16,
+    )
+
+    if runtime_mode == "prefill":
+        token_base = 0
+        token_count = min(ROPE_CHUNK_TOKENS, len(token_ids))
+        q_head_id = 0
+        kv_head_id = 0
+        q_in_tile = np.asarray(tensors["q_heads_q"][q_head_id, token_base:token_base + token_count, :], dtype=np.int8)
+        k_in_tile = np.asarray(tensors["k_heads_q"][kv_head_id, token_base:token_base + token_count, :], dtype=np.int8)
+        q_out_tile = np.asarray(tensors["q_heads_rope_q"][q_head_id, token_base:token_base + token_count, :], dtype=np.int8)
+        k_out_tile = np.asarray(tensors["k_heads_rope_q"][kv_head_id, token_base:token_base + token_count, :], dtype=np.int8)
+
+        query_pos_base = max(0, len(token_ids) - SCORE_ROWS_PER_CHUNK)
+        key_pos_base = 0
+        query_row_count = min(SCORE_ROWS_PER_CHUNK, len(token_ids))
+        key_col_count = min(SCORE_K_TILE, len(token_ids))
+    else:
+        token_base = max(0, len(token_ids) - 1)
+        token_count = 1
+        q_head_id = 0
+        kv_head_id = 0
+        q_in_tile = np.asarray(tensors["q_heads_q"][q_head_id, token_base:token_base + token_count, :], dtype=np.int8)
+        k_in_tile = np.asarray(tensors["k_heads_q"][kv_head_id, token_base:token_base + token_count, :], dtype=np.int8)
+        q_out_tile = np.asarray(tensors["q_heads_rope_q"][q_head_id, token_base:token_base + token_count, :], dtype=np.int8)
+        k_out_tile = np.asarray(tensors["k_heads_rope_q"][kv_head_id, token_base:token_base + token_count, :], dtype=np.int8)
+
+        query_pos_base = token_base
+        key_pos_base = 0
+        query_row_count = 1
+        key_col_count = min(SCORE_K_TILE, len(token_ids))
+
+    build_rope_case(
+        runtime_mode=runtime_mode,
+        layer_id=target_layer,
+        q_head_id=q_head_id,
+        kv_head_id=kv_head_id,
+        token_base=token_base,
+        q_in_tile=q_in_tile,
+        k_in_tile=k_in_tile,
+        q_out_tile=q_out_tile,
+        k_out_tile=k_out_tile,
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+
+    q_rot_full = np.asarray(tensors["q_heads_rope_q"][q_head_id], dtype=np.int8)
+    k_rot_full = np.asarray(tensors["k_heads_rope_q"][kv_head_id], dtype=np.int8)
+    score_active = q_rot_full[query_pos_base:query_pos_base + query_row_count, :].astype(np.int32) @ k_rot_full[key_pos_base:key_pos_base + key_col_count, :].T.astype(np.int32)
+    score_in_tile = np.zeros((SCORE_ROWS_PER_CHUNK, SCORE_K_TILE), dtype=np.int32)
+    score_in_tile[:query_row_count, :key_col_count] = score_active
+    score_out_tile = mask_score_tile(
+        runtime_mode=runtime_mode,
+        score_in_tile=score_in_tile,
+        query_pos_base=query_pos_base,
+        key_pos_base=key_pos_base,
+        query_row_count=query_row_count,
+        key_col_count=key_col_count,
+    )
+
+    build_causal_mask_case(
+        runtime_mode=runtime_mode,
+        layer_id=target_layer,
+        q_head_id=q_head_id,
+        kv_head_id=kv_head_id,
+        query_pos_base=query_pos_base,
+        key_pos_base=key_pos_base,
+        query_row_count=query_row_count,
+        key_col_count=key_col_count,
+        score_in_tile=score_in_tile,
+        score_out_tile=score_out_tile,
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+
+
+def export_phase4_cases(
+    *,
+    weights_path: str,
+    layer: int,
+    prefill_token_ids: list[int],
+    decode_context_token_ids: list[int],
+    output_dir: str,
+    source_root: Path,
+) -> Path:
+    output_root = Path(output_dir)
+    ensure_dir(output_root / PHASE4)
+
+    weights = ref.load_weights(weights_path, compute_dtype=np.float32, cache_arrays=False)
+    if layer < 0 or layer >= weights.cfg["num_hidden_layers"]:
+        raise ValueError(
+            f"--layer must be in [0, {weights.cfg['num_hidden_layers'] - 1}]"
+        )
+
+    cos_rom_q16, sin_rom_q16 = build_rope_rom_tables(
+        rope_theta=weights.cfg["rope_theta"],
+        source_root=source_root,
+    )
+
+    manifest_entries: list[dict[str, Any]] = []
+
+    export_phase4_for_tokens(
+        runtime_mode="prefill",
+        token_ids=prefill_token_ids,
+        target_layer=layer,
+        weights=weights,
+        cos_rom_q16=cos_rom_q16,
+        sin_rom_q16=sin_rom_q16,
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+    export_phase4_for_tokens(
+        runtime_mode="decode",
+        token_ids=decode_context_token_ids,
+        target_layer=layer,
+        weights=weights,
+        cos_rom_q16=cos_rom_q16,
+        sin_rom_q16=sin_rom_q16,
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+
+    manifest = {
+        "trace_format_version": 1,
+        "phase": PHASE4,
+        "model_id": weights.cfg["model_id"],
+        "weights_path": weights_path,
+        "layer": layer,
+        "prefill_token_ids": prefill_token_ids,
+        "decode_context_token_ids": decode_context_token_ids,
+        "rope_rom_cos_path": str((source_root / ROPE_COS_ROM_PATH).as_posix()),
+        "rope_rom_sin_path": str((source_root / ROPE_SIN_ROM_PATH).as_posix()),
+        "tile_constants": {
+            "ROPE_CHUNK_TOKENS": ROPE_CHUNK_TOKENS,
+            "HEAD_DIM": HEAD_DIM,
+            "SCORE_ROWS_PER_CHUNK": SCORE_ROWS_PER_CHUNK,
+            "SCORE_K_TILE": SCORE_K_TILE,
+            "MASK_NEG_INF": int(MASK_NEG_INF),
+        },
+        "cases": manifest_entries,
+    }
+
+    manifest_path = output_root / "manifest.json"
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+        handle.write("\n")
+    return manifest_path
+
+
 def export_phase3_for_tokens(
     *,
     runtime_mode: str,
@@ -660,9 +1195,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--phase",
-        choices=[PHASE3],
+        choices=[PHASE3, PHASE4],
         default=PHASE3,
-        help="Trace-export phase. Only phase3 is implemented in the first pass.",
+        help="Trace-export phase.",
     )
     parser.add_argument(
         "--weights",
@@ -692,14 +1227,31 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    manifest_path = export_phase3_cases(
-        weights_path=args.weights,
-        layer=args.layer,
-        prefill_token_ids=parse_token_ids(args.prefill_token_ids),
-        decode_token_ids=parse_token_ids(args.decode_token_ids),
-        output_dir=args.output_dir,
-    )
-    print(f"Wrote Phase 3 golden traces to {manifest_path.parent}")
+    prefill_token_ids = parse_token_ids(args.prefill_token_ids)
+    decode_token_ids_arg = args.decode_token_ids
+    if (args.phase == PHASE4) and (decode_token_ids_arg == DEFAULT_DECODE_TOKEN_IDS):
+        decode_token_ids_arg = DEFAULT_PHASE4_DECODE_CONTEXT_TOKEN_IDS
+    decode_token_ids = parse_token_ids(decode_token_ids_arg)
+
+    if args.phase == PHASE3:
+        manifest_path = export_phase3_cases(
+            weights_path=args.weights,
+            layer=args.layer,
+            prefill_token_ids=prefill_token_ids,
+            decode_token_ids=decode_token_ids,
+            output_dir=args.output_dir,
+        )
+    else:
+        manifest_path = export_phase4_cases(
+            weights_path=args.weights,
+            layer=args.layer,
+            prefill_token_ids=prefill_token_ids,
+            decode_context_token_ids=decode_token_ids,
+            output_dir=args.output_dir,
+            source_root=Path(__file__).resolve().parent.parent,
+        )
+
+    print(f"Wrote {args.phase} golden traces to {manifest_path.parent}")
     print(f"Manifest: {manifest_path}")
 
 

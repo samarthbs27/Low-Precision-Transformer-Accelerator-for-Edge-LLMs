@@ -339,6 +339,17 @@ Expected first-pass command shape:
 python model/export_fpga_vectors.py --phase phase4 --output-dir sim/golden_traces
 ```
 
+Current implemented Phase 4 export scope:
+
+- one prefill RoPE case
+- one decode RoPE case
+- one prefill causal-mask case
+- one decode causal-mask case
+- generated packed `.memh` fixtures for the Phase 4 RTL testbenches
+- generated RoPE Q16.16 ROM contents under:
+  - `rtl/compute/rope_cos_rom.memh`
+  - `rtl/compute/rope_sin_rom.memh`
+
 Expected later command shape:
 
 ```text

@@ -81,6 +81,19 @@ These production compute-path files now exist under `rtl/compute/`.
 | `compute/gemm_result_router.sv` | Mode-driven result router that emits quantized projection outputs and raw score/LM-head accumulators to the next stage. | Run `rtl/tb/tb_gemm_result_router.sv`. |
 | `compute/gemm_op_scheduler.sv` | Deterministic tile-loop scheduler for the GEMM-backed decoder-layer operations and LM-head-only mode. | Run `rtl/tb/tb_gemm_op_scheduler.sv`. |
 
+## Phase 4 Attention-Path Leaves
+
+These production attention-path files now also exist under `rtl/compute/`.
+
+| File | What it is | Smoke test |
+|------|------------|------------|
+| `compute/rope_cos_rom.memh` | Generated Q16.16 cosine table source for the RoPE ROM. | Regenerate it with `python model/export_fpga_vectors.py --phase phase4 --layer 0 --output-dir sim/golden_traces`. |
+| `compute/rope_sin_rom.memh` | Generated Q16.16 sine table source for the RoPE ROM. | Regenerate it with `python model/export_fpga_vectors.py --phase phase4 --layer 0 --output-dir sim/golden_traces`. |
+| `compute/rope_lut_rom.sv` | Token-major RoPE lookup ROM that expands one `8 x 64` head slice of sine/cosine values from the generated memh tables. | Covered by `rtl/tb/tb_rope_unit.sv`. |
+| `compute/rope_unit.sv` | Real INT8 rotary datapath that applies TinyLlama's rotate-half RoPE to one `8 x 64` Q slice and one `8 x 64` K slice while preserving the input scale. | Run `rtl/tb/tb_rope_unit.sv`, which consumes exported Phase 4 traces. |
+| `compute/gqa_router.sv` | Grouped-query attention routing leaf that validates `q_head -> kv_head` mapping and rewrites K/V tags for score vs weighted-sum use. | Run `rtl/tb/tb_gqa_router.sv`. |
+| `compute/causal_mask_unit.sv` | Real pre-softmax score-mask leaf for one `8 x 64` score chunk using the frozen `MASK_NEG_INF` fill contract. | Run `rtl/tb/tb_causal_mask_unit.sv`, which consumes exported Phase 4 traces. |
+
 ## Synthesis Readiness
 
 The production RTL under `rtl/common/`, `rtl/control/`, and the later
@@ -100,6 +113,7 @@ Use this checklist as we add new production RTL:
 - module compiles in the shared syntax/integration check
 - module has no simulation-only logic in the production path
   - no `initial` blocks for normal operation
+  - exception: ROM initialization with generated memh source files is allowed
   - no `#` delays
   - no `wait`, `fork/join`, or testbench-only tasks
 - loop variables and procedural state are local and unambiguous across
