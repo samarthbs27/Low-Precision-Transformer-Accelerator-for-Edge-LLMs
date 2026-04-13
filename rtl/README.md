@@ -34,7 +34,51 @@ iverilog -g2012 -t null `
 
 This is the quickest syntax/integration check for the current production common layer.
 
+## Phase 1 Control Skeleton
+
+These are the first production control-path modules now implemented under `rtl/control/`.
+
+| File | What it is | Smoke test |
+|------|------------|------------|
+| `control/axi_lite_ctrl_slave.sv` | AXI4-Lite front-end that translates host register reads and writes into the internal register-file interface. | Run `rtl/tb/tb_axi_lite_ctrl_slave.sv`. |
+| `control/kernel_reg_file.sv` | Concrete launch/status register file with the frozen control-register map, sticky status bits, and command outputs. | Run `rtl/tb/tb_axi_lite_ctrl_slave.sv`. |
+| `control/host_cmd_status_mgr.sv` | Stub PC30 command/status DMA manager that fetches one command beat per launch and writes one status beat on terminal events. | Run `rtl/tb/tb_host_cmd_status_mgr.sv`. |
+| `control/prefill_decode_controller.sv` | Runtime controller stub for `IDLE -> prefill/decode layer pass -> LM head -> token/stop -> DONE`. | Run `rtl/tb/tb_prefill_decode_controller.sv`. |
+| `control/layer_controller.sv` | Reused 22-layer loop controller that iterates `layer_id = 0..21` for one full decoder pass. | Run `rtl/tb/tb_prefill_decode_controller.sv`. |
+| `control/stop_condition_unit.sv` | Stop-condition block for EOS, max-token, and host-abort termination. | Run `rtl/tb/tb_prefill_decode_controller.sv`. |
+
 When a command in this folder produces simulator output, waveform dumps, or logs, put them under `sim/`.
+
+## Synthesis Readiness
+
+The production RTL under `rtl/common/`, `rtl/control/`, and the later
+subfolders is being written as synthesizable RTL for the FPGA.
+
+That means:
+
+- production modules should use synthesis-friendly constructs such as
+  `always_ff`, `always_comb`, bounded `for` loops, enums, packed structs, and
+  generate blocks
+- testbenches under `rtl/tb/` are not synthesizable and are only for simulation
+- passing a smoke test does **not** by itself prove Vivado/Vitis synthesis is
+  clean
+
+Use this checklist as we add new production RTL:
+
+- module compiles in the shared syntax/integration check
+- module has no simulation-only logic in the production path
+  - no `initial` blocks for normal operation
+  - no `#` delays
+  - no `wait`, `fork/join`, or testbench-only tasks
+- loop variables and procedural state are local and unambiguous across
+  processes
+- widths, casts, signedness, and enum usage follow `rtl/common/tinyllama_pkg.sv`
+  and `rtl/common/tinyllama_bus_pkg.sv`
+- any local scratch/output artifacts from checks go under `sim/`
+- module has at least one smoke test or is covered by a higher-level syntax
+  integration command
+- later, before calling a block synthesis-ready in the strongest sense, it still
+  needs a real vendor-tool synthesis pass
 
 ## Legacy Validation Files
 

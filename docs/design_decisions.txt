@@ -1,6 +1,6 @@
 DESIGN DECISIONS - TinyLlama U55C Inference Accelerator
 =======================================================
-Last updated: 2026-04-10
+Last updated: 2026-04-12
 Author: Samarth (Dataflow, Tiling, Control)
 
 This file tracks the current architecture decisions for the post-Phase-1
@@ -287,6 +287,74 @@ B8. Debug / observability contract
     - quantization scales used by the captured block
   Captures are layer-scoped or decode-step-scoped, not full unbounded traces.
   Debug data is read back by the host after the selected step completes.
+
+B9. AXI-Lite control-register map and launch semantics
+  The control-plane register interface is fixed to 32-bit AXI-Lite words.
+  All 64-bit base addresses are exposed as low/high 32-bit register pairs.
+  The register map is fixed as:
+    - word 0: CONTROL
+    - word 1: STATUS
+    - word 2: CMD_BASE_LO
+    - word 3: CMD_BASE_HI
+    - word 4: STATUS_BASE_LO
+    - word 5: STATUS_BASE_HI
+    - word 6: DEBUG_BASE_LO
+    - word 7: DEBUG_BASE_HI
+    - word 8: PROMPT_TOKEN_COUNT
+    - word 9: MAX_NEW_TOKENS
+    - word 10: EOS_TOKEN_ID
+    - word 11: DEBUG_CFG
+    - word 12: GENERATED_TOKEN_COUNT
+    - word 13: LAST_TOKEN_ID
+    - word 14: CURRENT_LAYER
+    - word 15: CURRENT_BLOCK
+    - word 16: RTL_VERSION
+  CONTROL bit definitions are fixed as:
+    - bit 0: START (write-one pulse)
+    - bit 1: MODE (0 = prefill launch, 1 = decode-only launch)
+    - bit 2: ABORT_REQ (sticky until a new launch or hardware completion clears it)
+  STATUS bit definitions are fixed as:
+    - bit 0: BUSY
+    - bit 1: DONE (sticky)
+    - bit 2: ERROR (sticky)
+    - bit 3: STOP_VALID (sticky)
+    - bits [6:4]: STOP_REASON
+    - bits [11:8]: ERROR_CODE
+  DEBUG_CFG bit definitions are fixed as:
+    - bit 0: DEBUG_ENABLE
+    - bits [8:4]: DEBUG_LAYER_SEL
+    - bits [19:12]: DEBUG_STEP_SEL
+  Launch semantics are fixed as:
+    - MODE = 0 and MAX_NEW_TOKENS = 0 -> prefill-only execution
+    - MODE = 0 and MAX_NEW_TOKENS > 0 -> prefill followed by decode loop
+    - MODE = 1 -> decode-only execution using a pre-existing KV cache
+  The first emitted token after a normal prompt launch is produced immediately
+  after the prefill pass completes and the FPGA executes final RMSNorm, LM head,
+  and greedy argmax for the prompt tail position.
+
+B10. PC30 host command/status block layout
+  The command block and status block written through PC30 are fixed to one
+  256-bit beat each.
+  Command block word layout is fixed as:
+    - word 0: PROMPT_TOKENS_BASE_LO
+    - word 1: PROMPT_TOKENS_BASE_HI
+    - word 2: GENERATED_TOKENS_BASE_LO
+    - word 3: GENERATED_TOKENS_BASE_HI
+    - word 4: GENERATED_TOKENS_CAPACITY
+    - words 5..7: reserved
+  Status block word layout is fixed as:
+    - word 0: STATUS bits using the same bit packing as the AXI-Lite STATUS register
+    - word 1: GENERATED_TOKEN_COUNT
+    - word 2: LAST_TOKEN_ID
+    - word 3: CURRENT_LAYER
+    - word 4: CURRENT_BLOCK
+    - words 5..6: reserved
+    - word 7: RTL_VERSION
+  `host_cmd_status_mgr.sv` reads the command beat from `cmd_base_addr` on every
+  launch, exposes the parsed prompt/ring-buffer addresses to downstream blocks,
+  and writes one status beat to `status_base_addr` when terminal status changes
+  occur.
+  The host software and FPGA runtime must both follow this exact layout.
 
 ---
 

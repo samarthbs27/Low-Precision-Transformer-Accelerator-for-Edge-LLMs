@@ -256,10 +256,13 @@ hardware implementation.
   to `PC30`.
 - Inputs / buses:
   - `cmd_base_addr`, `status_base_addr`, `start`
-  - HBM request channel to `hbm_port_router.sv`
+  - one-beat command read descriptor and one-beat command data return from
+    `hbm_port_router.sv`
 - Outputs / buses:
-  - parsed command fields to `prefill_decode_controller.sv`
-  - status-write requests to `hbm_port_router.sv`
+  - parsed prompt-token-base, generated-token-ring-base, and generated-token
+    capacity fields to downstream runtime blocks
+  - one-beat status-write descriptor and one-beat status payload to
+    `hbm_port_router.sv`
 - Parallelism:
   - no arithmetic parallelism; pipelined command/status DMA.
 

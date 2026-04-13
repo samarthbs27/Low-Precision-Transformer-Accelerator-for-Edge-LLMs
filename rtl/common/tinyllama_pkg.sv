@@ -19,6 +19,10 @@ package tinyllama_pkg;
   localparam int unsigned TOKEN_W       = 32;
   localparam int unsigned SCALE_W       = 32;
   localparam int unsigned PROB_W        = 8;
+  localparam int unsigned AXIL_DATA_W   = 32;
+  localparam int unsigned AXIL_STRB_W   = AXIL_DATA_W / 8;
+  localparam int unsigned AXIL_ADDR_W   = 12;
+  localparam int unsigned REG_WORD_ADDR_W = AXIL_ADDR_W - 2;
 
   // Memory and tiling parameters.
   localparam int unsigned GEMM_LANES       = 512;
@@ -65,6 +69,64 @@ package tinyllama_pkg;
   localparam int unsigned STOP_REASON_W = 3;
   localparam int unsigned TENSOR_ID_W   = 5;
   localparam int unsigned REGION_ID_W   = 3;
+  localparam logic [PC_ID_W-1:0] HOST_IO_PC_ID = PC_ID_W'(30);
+
+  // Host command/status block layout in PC30.
+  localparam int unsigned HOST_BLOCK_WORDS = DMA_BEAT_W / AXIL_DATA_W;
+  localparam int unsigned HOST_BLOCK_BYTES = DMA_BEAT_W / 8;
+  localparam int unsigned HOST_CMD_WORD_PROMPT_BASE_LO = 0;
+  localparam int unsigned HOST_CMD_WORD_PROMPT_BASE_HI = 1;
+  localparam int unsigned HOST_CMD_WORD_GEN_BASE_LO    = 2;
+  localparam int unsigned HOST_CMD_WORD_GEN_BASE_HI    = 3;
+  localparam int unsigned HOST_CMD_WORD_GEN_CAPACITY   = 4;
+  localparam int unsigned HOST_STATUS_WORD_STATUS      = 0;
+  localparam int unsigned HOST_STATUS_WORD_GEN_COUNT   = 1;
+  localparam int unsigned HOST_STATUS_WORD_LAST_TOKEN  = 2;
+  localparam int unsigned HOST_STATUS_WORD_CUR_LAYER   = 3;
+  localparam int unsigned HOST_STATUS_WORD_CUR_BLOCK   = 4;
+  localparam int unsigned HOST_STATUS_WORD_VERSION     = 7;
+
+  // AXI-Lite register map word indices.
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_CONTROL               = 'd0;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_STATUS                = 'd1;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_CMD_BASE_LO           = 'd2;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_CMD_BASE_HI           = 'd3;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_STATUS_BASE_LO        = 'd4;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_STATUS_BASE_HI        = 'd5;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_DEBUG_BASE_LO         = 'd6;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_DEBUG_BASE_HI         = 'd7;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_PROMPT_TOKEN_COUNT    = 'd8;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_MAX_NEW_TOKENS        = 'd9;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_EOS_TOKEN_ID          = 'd10;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_DEBUG_CFG             = 'd11;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_GENERATED_TOKEN_COUNT = 'd12;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_LAST_TOKEN_ID         = 'd13;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_CURRENT_LAYER         = 'd14;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_CURRENT_BLOCK         = 'd15;
+  localparam logic [REG_WORD_ADDR_W-1:0] REGW_VERSION               = 'd16;
+
+  // AXI-Lite control register bit definitions.
+  localparam int unsigned CTRL_START_BIT       = 0;
+  localparam int unsigned CTRL_MODE_BIT        = 1;
+  localparam int unsigned CTRL_ABORT_REQ_BIT   = 2;
+
+  localparam int unsigned STATUS_BUSY_BIT      = 0;
+  localparam int unsigned STATUS_DONE_BIT      = 1;
+  localparam int unsigned STATUS_ERROR_BIT     = 2;
+  localparam int unsigned STATUS_STOP_VALID_BIT = 3;
+  localparam int unsigned STATUS_STOP_REASON_LSB = 4;
+  localparam int unsigned STATUS_STOP_REASON_MSB = STATUS_STOP_REASON_LSB + STOP_REASON_W - 1;
+  localparam int unsigned STATUS_ERROR_CODE_LSB = 8;
+  localparam int unsigned STATUS_ERROR_CODE_MSB = STATUS_ERROR_CODE_LSB + ERROR_CODE_W - 1;
+
+  localparam int unsigned DEBUG_CFG_ENABLE_BIT = 0;
+  localparam int unsigned DEBUG_CFG_LAYER_LSB  = 4;
+  localparam int unsigned DEBUG_CFG_LAYER_MSB  = DEBUG_CFG_LAYER_LSB + LAYER_ID_W - 1;
+  localparam int unsigned DEBUG_CFG_STEP_LSB   = 12;
+  localparam int unsigned DEBUG_CFG_STEP_W     = 8;
+  localparam int unsigned DEBUG_CFG_STEP_MSB   = DEBUG_CFG_STEP_LSB + DEBUG_CFG_STEP_W - 1;
+
+  localparam logic [31:0] RTL_VERSION_WORD     = 32'h0001_0000;
 
   typedef enum logic {
     MODE_PREFILL = 1'b0,

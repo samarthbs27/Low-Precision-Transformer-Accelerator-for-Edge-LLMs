@@ -23,12 +23,11 @@ module stream_fifo #(
   logic              push;
   logic              pop;
 
-  initial begin
-    if (DEPTH == 0) begin
-      $error("stream_fifo DEPTH must be >= 1");
-      $finish;
+  generate
+    if (DEPTH == 0) begin : g_invalid_depth
+      invalid_stream_fifo_depth__must_be_ge_1 invalid_cfg();
     end
-  end
+  endgenerate
 
   assign out_valid  = (occupancy != '0);
   assign in_ready   = (occupancy != DEPTH) || (out_valid && out_ready);

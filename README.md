@@ -72,10 +72,20 @@ Project/
       stream_fifo.sv
       skid_buffer.sv
       descriptor_fifo.sv
+    control/
+      axi_lite_ctrl_slave.sv
+      kernel_reg_file.sv
+      host_cmd_status_mgr.sv
+      prefill_decode_controller.sv
+      layer_controller.sv
+      stop_condition_unit.sv
     tb/
       README.md
       tb_stream_fifo.sv
       tb_descriptor_fifo.sv
+      tb_axi_lite_ctrl_slave.sv
+      tb_host_cmd_status_mgr.sv
+      tb_prefill_decode_controller.sv
     control_fsm.sv
     top.sv
     mac_unit.sv
@@ -123,6 +133,12 @@ Project/
 - `model/` contains the TinyLlama software reference and the GEMM-only INT8 analysis/generation bridge.
 - `rtl/` contains the existing validation core for the shared GEMM engine and control FSM.
 - `rtl/common/`, `rtl/tb/`, and `hls/common/` now contain the verified Phase 0 production foundation.
+- `rtl/control/` now contains the verified Phase 1 control-plane skeleton, including the PC30 command/status manager stub.
 - `docs/` now describe the full TinyLlama prefill/decode accelerator that the project is building toward.
 
 The current RTL is still validation infrastructure; the finalized system architecture is documented in `docs/`.
+
+One practical note: the production RTL we are writing is intended to be
+synthesizable, but a passing Icarus smoke test is only the first gate. The
+current synthesis-readiness checklist lives in [rtl/README.md](rtl/README.md)
+and should be used alongside simulation results as the implementation grows.
