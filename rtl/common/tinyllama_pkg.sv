@@ -29,6 +29,8 @@ package tinyllama_pkg;
   localparam int unsigned HBM_PC_COUNT     = 32;
   localparam int unsigned HBM_ADDR_W       = 64;
   localparam int unsigned DMA_BEAT_W       = 256;
+  localparam int unsigned DMA_BEAT_BYTES   = DMA_BEAT_W / 8;
+  localparam int unsigned TOKENS_PER_DMA_BEAT = DMA_BEAT_W / TOKEN_W;
   localparam int unsigned STREAM_FIFO_DEPTH = 4;
   localparam int unsigned SKID_BUFFER_DEPTH = 2;
   localparam int unsigned DESC_FIFO_DEPTH   = 8;
@@ -73,7 +75,7 @@ package tinyllama_pkg;
 
   // Host command/status block layout in PC30.
   localparam int unsigned HOST_BLOCK_WORDS = DMA_BEAT_W / AXIL_DATA_W;
-  localparam int unsigned HOST_BLOCK_BYTES = DMA_BEAT_W / 8;
+  localparam int unsigned HOST_BLOCK_BYTES = DMA_BEAT_BYTES;
   localparam int unsigned HOST_CMD_WORD_PROMPT_BASE_LO = 0;
   localparam int unsigned HOST_CMD_WORD_PROMPT_BASE_HI = 1;
   localparam int unsigned HOST_CMD_WORD_GEN_BASE_LO    = 2;

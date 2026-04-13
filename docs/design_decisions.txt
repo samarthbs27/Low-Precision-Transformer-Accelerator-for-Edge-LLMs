@@ -356,6 +356,24 @@ B10. PC30 host command/status block layout
   occur.
   The host software and FPGA runtime must both follow this exact layout.
 
+B11. Internal DMA descriptor contract
+  All internal HBM-facing DMA paths use a split descriptor/data handshake:
+    - read path: descriptor valid/ready, then beat data valid/ready
+    - write path: descriptor valid/ready and write-data valid/ready
+  The shared descriptor format is fixed to:
+    - region
+    - tensor_id
+    - write_not_read
+    - pseudo_channel
+    - addr
+    - burst_len (16 bits)
+    - byte_count (32 bits)
+    - layer_id
+    - kv_head_id
+    - tile_id
+  `byte_count` is fixed to 32 bits because full KV-cache transfers can exceed
+  65535 bytes.
+
 ---
 
 SECTION C - REUSABLE BUILDING BLOCKS ALREADY IMPLEMENTED

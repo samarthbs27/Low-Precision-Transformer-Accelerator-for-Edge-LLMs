@@ -139,6 +139,31 @@ Common tag fields:
 - `seq_count`
 - `head_id`
 
+### 2.5 Internal DMA / HBM Handshake Convention
+
+All Phase 2 memory modules use a split descriptor/data handshake.
+
+Read side:
+
+- `rd_desc_valid`
+- `rd_desc_ready`
+- `rd_desc : dma_desc_t`
+- `rd_data_valid`
+- `rd_data_ready`
+- `rd_data[DMA_BEAT_W-1:0]`
+
+Write side:
+
+- `wr_desc_valid`
+- `wr_desc_ready`
+- `wr_desc : dma_desc_t`
+- `wr_data_valid`
+- `wr_data_ready`
+- `wr_data[DMA_BEAT_W-1:0]`
+
+`dma_desc_t.byte_count` is 32 bits. This is required because full KV-cache
+transfers can exceed 65535 bytes.
+
 ---
 
 ## 3. Crossbar / Switching Fabric Decision
@@ -405,6 +430,8 @@ hardware implementation.
   - HBM read channel from `hbm_port_router.sv`
 - Outputs / buses:
   - `wt_bus` stream into `tile_buffer_bank.sv`
+  - one streamed `wt_bus` beat per returned DMA beat, with `tag.is_last`
+    marking the final beat of the descriptor
 - Parallelism:
   - striped parallel reads across multiple weight pseudo-channels.
 
@@ -418,9 +445,12 @@ hardware implementation.
   - row address / tile descriptors
   - HBM read channel from `hbm_port_router.sv`
 - Outputs / buses:
-  - embedding rows to `embedding_lookup.sv`
-  - LM-head tiles to `tile_buffer_bank.sv`
-  - scale metadata to `scale_metadata_store.sv`
+  - embedding-row beat stream to `embedding_lookup.sv`, with an explicit
+    beat-level `last` indication
+  - RMSNorm-gamma beat stream to the normalization path, with an explicit
+    beat-level `last` indication
+  - LM-head `wt_bus` beat stream to `tile_buffer_bank.sv`
+  - aggregated scale metadata entry to `scale_metadata_store.sv`
 - Parallelism:
   - independent read streams for embedding path and LM-head path.
 
@@ -433,7 +463,9 @@ hardware implementation.
   - read descriptors from `kv_cache_manager.sv`
   - HBM read channel from `hbm_port_router.sv`
 - Outputs / buses:
-  - K/V tiles to `tile_buffer_bank.sv`
+  - K/V `act_bus` stream to `tile_buffer_bank.sv`
+  - one streamed `act_bus` beat per returned DMA beat, with `tag.is_last`
+    marking the final beat of the descriptor
 - Parallelism:
   - K and V streams in parallel, each striped across assigned pseudo-channels.
 

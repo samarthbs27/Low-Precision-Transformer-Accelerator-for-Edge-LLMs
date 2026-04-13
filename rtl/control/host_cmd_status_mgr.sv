@@ -60,7 +60,7 @@ module host_cmd_status_mgr (
   assign cmd_read_desc_o.pseudo_channel = HOST_IO_PC_ID;
   assign cmd_read_desc_o.addr           = cmd_base_addr_i;
   assign cmd_read_desc_o.burst_len      = 16'd1;
-  assign cmd_read_desc_o.byte_count     = HOST_BLOCK_BYTES[15:0];
+  assign cmd_read_desc_o.byte_count     = HOST_BLOCK_BYTES;
   assign cmd_read_desc_o.layer_id       = '0;
   assign cmd_read_desc_o.kv_head_id     = '0;
   assign cmd_read_desc_o.tile_id        = '0;
@@ -71,7 +71,7 @@ module host_cmd_status_mgr (
   assign status_write_desc_o.pseudo_channel = HOST_IO_PC_ID;
   assign status_write_desc_o.addr           = status_base_addr_i;
   assign status_write_desc_o.burst_len      = 16'd1;
-  assign status_write_desc_o.byte_count     = HOST_BLOCK_BYTES[15:0];
+  assign status_write_desc_o.byte_count     = HOST_BLOCK_BYTES;
   assign status_write_desc_o.layer_id       = '0;
   assign status_write_desc_o.kv_head_id     = '0;
   assign status_write_desc_o.tile_id        = '0;

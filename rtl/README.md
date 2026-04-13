@@ -49,6 +49,24 @@ These are the first production control-path modules now implemented under `rtl/c
 
 When a command in this folder produces simulator output, waveform dumps, or logs, put them under `sim/`.
 
+## Phase 2 Memory And Buffer Skeleton
+
+These production memory-path files now exist under `rtl/memory/`.
+
+| File | What it is | Smoke test |
+|------|------------|------------|
+| `memory/hbm_port_router.sv` | Fixed-function HBM arbitration and steering layer between internal DMA clients and the shared shell-side read/write path. | Run `rtl/tb/tb_hbm_port_router.sv`. |
+| `memory/prompt_token_reader.sv` | Prompt token DMA reader that fetches token IDs from the host I/O region and emits a `token_bus` stream. | Run `rtl/tb/tb_prompt_token_reader.sv`. |
+| `memory/generated_token_writer.sv` | Generated-token ring-buffer writer for host-visible token output in `PC30`. | Run `rtl/tb/tb_generated_token_writer.sv`. |
+| `memory/weight_dma_reader.sv` | Decoder-layer weight DMA reader with descriptor-handshake gating, tensor-to-block tag mapping, and streamed multi-beat `wt_bus` output. | Run `rtl/tb/tb_weight_dma_reader.sv`. |
+| `memory/embedding_lmhead_dma_reader.sv` | Shared multi-beat reader for embedding/gamma beat streams, LM-head weight beats, and aggregated scale metadata. | Run `rtl/tb/tb_embedding_lmhead_dma_reader.sv`. |
+| `memory/kv_cache_dma_reader.sv` | K/V cache DMA reader with descriptor-handshake gating and streamed multi-beat `act_bus` output. | Run `rtl/tb/tb_kv_cache_dma_reader.sv`. |
+| `memory/kv_cache_dma_writer.sv` | Quantized K/V cache writer with buffered write data and clean ready/valid behavior. | Run `rtl/tb/tb_kv_cache_dma_writer.sv`. |
+| `memory/debug_dma_writer.sv` | Debug capture DMA writer stub for the dedicated debug buffer in `PC31`. | Covered by the Phase 2 syntax/integration compile. |
+| `memory/scale_metadata_store.sv` | Multi-port scale metadata store for activation/KV/LM-head scale vectors. | Run `rtl/tb/tb_scale_metadata_store.sv`. |
+| `memory/tile_buffer_bank.sv` | Generic ping/pong banked tile buffer used for memory/compute decoupling. | Run `rtl/tb/tb_tile_buffer_bank.sv`. |
+| `memory/kv_cache_manager.sv` | Deterministic KV-cache descriptor/address generator for layer/head/token windows. | Run `rtl/tb/tb_kv_cache_manager.sv`. |
+
 ## Synthesis Readiness
 
 The production RTL under `rtl/common/`, `rtl/control/`, and the later

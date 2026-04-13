@@ -79,6 +79,18 @@ Project/
       prefill_decode_controller.sv
       layer_controller.sv
       stop_condition_unit.sv
+    memory/
+      hbm_port_router.sv
+      prompt_token_reader.sv
+      generated_token_writer.sv
+      weight_dma_reader.sv
+      embedding_lmhead_dma_reader.sv
+      kv_cache_dma_reader.sv
+      kv_cache_dma_writer.sv
+      debug_dma_writer.sv
+      scale_metadata_store.sv
+      tile_buffer_bank.sv
+      kv_cache_manager.sv
     tb/
       README.md
       tb_stream_fifo.sv
@@ -86,6 +98,16 @@ Project/
       tb_axi_lite_ctrl_slave.sv
       tb_host_cmd_status_mgr.sv
       tb_prefill_decode_controller.sv
+      tb_hbm_port_router.sv
+      tb_tile_buffer_bank.sv
+      tb_prompt_token_reader.sv
+      tb_generated_token_writer.sv
+      tb_scale_metadata_store.sv
+      tb_kv_cache_manager.sv
+      tb_weight_dma_reader.sv
+      tb_kv_cache_dma_reader.sv
+      tb_kv_cache_dma_writer.sv
+      tb_embedding_lmhead_dma_reader.sv
     control_fsm.sv
     top.sv
     mac_unit.sv
@@ -134,6 +156,7 @@ Project/
 - `rtl/` contains the existing validation core for the shared GEMM engine and control FSM.
 - `rtl/common/`, `rtl/tb/`, and `hls/common/` now contain the verified Phase 0 production foundation.
 - `rtl/control/` now contains the verified Phase 1 control-plane skeleton, including the PC30 command/status manager stub.
+- `rtl/memory/` now contains the hardened Phase 2 memory/DMA/buffer layer, including verified router, prompt I/O, generated-token I/O, multi-beat weight/KV readers, buffered KV writeback, scale-store, KV-address, and tile-buffer smoke tests.
 - `docs/` now describe the full TinyLlama prefill/decode accelerator that the project is building toward.
 
 The current RTL is still validation infrastructure; the finalized system architecture is documented in `docs/`.

@@ -54,7 +54,7 @@ package tinyllama_bus_pkg;
     logic [PC_ID_W-1:0]        pseudo_channel;
     logic [HBM_ADDR_W-1:0]     addr;
     logic [15:0]               burst_len;
-    logic [15:0]               byte_count;
+    logic [31:0]               byte_count;
     logic [LAYER_ID_W-1:0]     layer_id;
     logic [KV_HEAD_ID_W-1:0]   kv_head_id;
     logic [TILE_ID_W-1:0]      tile_id;

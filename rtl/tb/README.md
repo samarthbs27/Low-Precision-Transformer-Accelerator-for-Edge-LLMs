@@ -11,6 +11,16 @@ This folder contains production TinyLlama RTL smoke tests for the new `rtl/commo
 | `tb_axi_lite_ctrl_slave.sv` | AXI-Lite plus register-file smoke test covering register writes, register reads, sticky status, clear-on-START behavior, launch mode, and abort behavior. | Run the `tb_axi_lite_ctrl_slave` command below. |
 | `tb_host_cmd_status_mgr.sv` | Fake-HBM smoke test for one-beat command fetch from PC30, one-beat terminal status writeback to PC30, and relaunch/error-only command-status behavior. | Run the `tb_host_cmd_status_mgr` command below. |
 | `tb_prefill_decode_controller.sv` | Control-path smoke test covering prefill launch, 22-layer iteration, LM-head/token handoff, EOS stop, MAX_TOKENS stop, host-abort stop, and zero-token prefill rejection. | Run the `tb_prefill_decode_controller` command below. |
+| `tb_hbm_port_router.sv` | Directed arbitration/routing smoke test for the fixed-function HBM router. | Run the `tb_hbm_port_router` command below. |
+| `tb_tile_buffer_bank.sv` | Directed ping/pong banked storage smoke test for the generic tile buffer. | Run the `tb_tile_buffer_bank` command below. |
+| `tb_prompt_token_reader.sv` | Directed host-I/O DMA smoke test for prompt token burst fetch and token stream emission. | Run the `tb_prompt_token_reader` command below. |
+| `tb_generated_token_writer.sv` | Directed host-I/O DMA smoke test for generated-token write beats and ring-buffer wrap behavior. | Run the `tb_generated_token_writer` command below. |
+| `tb_scale_metadata_store.sv` | Directed read/write smoke test for multi-port scale metadata storage. | Run the `tb_scale_metadata_store` command below. |
+| `tb_kv_cache_manager.sv` | Directed descriptor-generation smoke test for fixed KV-cache address and channel mapping. | Run the `tb_kv_cache_manager` command below. |
+| `tb_weight_dma_reader.sv` | Directed multi-beat weight-reader smoke test covering descriptor handshake, streamed beat output, and tensor-to-block tag mapping. | Run the `tb_weight_dma_reader` command below. |
+| `tb_kv_cache_dma_reader.sv` | Directed multi-beat KV-cache reader smoke test covering descriptor handshake, V/K block tagging, and final-beat marking. | Run the `tb_kv_cache_dma_reader` command below. |
+| `tb_kv_cache_dma_writer.sv` | Directed KV-cache write smoke test covering buffered payload capture and ready/valid behavior. | Run the `tb_kv_cache_dma_writer` command below. |
+| `tb_embedding_lmhead_dma_reader.sv` | Directed multi-mode reader smoke test for embedding beat streams, LM-head weight beats, and aggregated scale metadata. | Run the `tb_embedding_lmhead_dma_reader` command below. |
 
 ## Smoke Tests
 
@@ -100,4 +110,173 @@ Expected pass string:
 
 ```text
 PASS: tb_prefill_decode_controller
+```
+
+### `tb_hbm_port_router.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_hbm_port_router.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/memory/hbm_port_router.sv `
+  rtl/tb/tb_hbm_port_router.sv
+vvp sim/tb_hbm_port_router.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_hbm_port_router
+```
+
+### `tb_tile_buffer_bank.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_tile_buffer_bank.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/memory/tile_buffer_bank.sv `
+  rtl/tb/tb_tile_buffer_bank.sv
+vvp sim/tb_tile_buffer_bank.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_tile_buffer_bank
+```
+
+### `tb_prompt_token_reader.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_prompt_token_reader.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/memory/prompt_token_reader.sv `
+  rtl/tb/tb_prompt_token_reader.sv
+vvp sim/tb_prompt_token_reader.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_prompt_token_reader
+```
+
+### `tb_generated_token_writer.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_generated_token_writer.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/memory/generated_token_writer.sv `
+  rtl/tb/tb_generated_token_writer.sv
+vvp sim/tb_generated_token_writer.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_generated_token_writer
+```
+
+### `tb_scale_metadata_store.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_scale_metadata_store.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/memory/scale_metadata_store.sv `
+  rtl/tb/tb_scale_metadata_store.sv
+vvp sim/tb_scale_metadata_store.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_scale_metadata_store
+```
+
+### `tb_kv_cache_manager.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_kv_cache_manager.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/memory/kv_cache_manager.sv `
+  rtl/tb/tb_kv_cache_manager.sv
+vvp sim/tb_kv_cache_manager.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_kv_cache_manager
+```
+
+### `tb_weight_dma_reader.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_weight_dma_reader.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/memory/weight_dma_reader.sv `
+  rtl/tb/tb_weight_dma_reader.sv
+vvp sim/tb_weight_dma_reader.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_weight_dma_reader
+```
+
+### `tb_kv_cache_dma_reader.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_kv_cache_dma_reader.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/memory/kv_cache_dma_reader.sv `
+  rtl/tb/tb_kv_cache_dma_reader.sv
+vvp sim/tb_kv_cache_dma_reader.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_kv_cache_dma_reader
+```
+
+### `tb_kv_cache_dma_writer.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_kv_cache_dma_writer.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/memory/kv_cache_dma_writer.sv `
+  rtl/tb/tb_kv_cache_dma_writer.sv
+vvp sim/tb_kv_cache_dma_writer.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_kv_cache_dma_writer
+```
+
+### `tb_embedding_lmhead_dma_reader.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_embedding_lmhead_dma_reader.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/memory/embedding_lmhead_dma_reader.sv `
+  rtl/tb/tb_embedding_lmhead_dma_reader.sv
+vvp sim/tb_embedding_lmhead_dma_reader.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_embedding_lmhead_dma_reader
 ```
