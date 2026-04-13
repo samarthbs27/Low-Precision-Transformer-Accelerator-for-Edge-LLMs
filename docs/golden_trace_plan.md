@@ -198,6 +198,13 @@ The array names inside each `.npz` are fixed by block family.
 Optional:
 
 - `acc_init`
+- `act_steps`
+- `wt_steps`
+- `acc_expected_lane`
+- `active_lane_count`
+
+When present, the `*_steps` arrays use the fixed row-major `M_TILE x N_TILE`
+lane packing defined in `modules.md`.
 
 ### 7.2 Requantization Cases
 
@@ -279,8 +286,11 @@ When a block reaches trace-backed verification:
 For RTL, the preferred pattern is:
 
 - export canonical `.npz`
-- derive a small text or include-format fixture only for the selected case
+- derive a small text, `.memh`, or include-format fixture only for the selected case
 - keep the derived fixture under `sim/golden_traces/`
+
+The current Phase 3 implementation uses packed `.memh` fixtures for RTL
+consumption.
 
 This keeps the Python export path authoritative while avoiding heavy file
 parsing logic inside RTL testbenches.

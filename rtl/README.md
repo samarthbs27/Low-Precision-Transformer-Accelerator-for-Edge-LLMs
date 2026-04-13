@@ -75,8 +75,8 @@ These production compute-path files now exist under `rtl/compute/`.
 |------|------------|------------|
 | `compute/mac_lane.sv` | Signed INT8xINT8->INT32 MAC leaf used as the lane-level arithmetic reference for the shared engine. | Run `rtl/tb/tb_mac_lane.sv`. |
 | `compute/accumulator_bank.sv` | 512-lane INT32 accumulator storage with explicit clear/load/tag update behavior. | Run `rtl/tb/tb_accumulator_bank.sv`. |
-| `compute/requantize_unit.sv` | Bank-scaled INT32->INT8 requantizer using unsigned Q16.16 multipliers, round-to-nearest-even, and saturating clamp. | Run `rtl/tb/tb_requantize_unit.sv`. |
-| `compute/shared_gemm_engine.sv` | Output-stationary 512-lane shared GEMM core with clear-on-first-slice accumulation and buffered result snapshotting. | Run `rtl/tb/tb_shared_gemm_engine.sv`. |
+| `compute/requantize_unit.sv` | Bank-scaled INT32->INT8 requantizer using unsigned Q16.16 multipliers, round-to-nearest-even, and saturating clamp. | Run `rtl/tb/tb_requantize_unit.sv`, which now also consumes exported Phase 3 trace fixtures. |
+| `compute/shared_gemm_engine.sv` | Output-stationary 512-lane shared GEMM core with clear-on-first-slice accumulation and buffered result snapshotting. | Run `rtl/tb/tb_shared_gemm_engine.sv`, which now replays an exported Phase 3 q-projection trace slice. |
 | `compute/gemm_operand_router.sv` | Mode-driven operand selector that routes activation, weight, score, and KV tiles into the shared GEMM core. | Run `rtl/tb/tb_gemm_operand_router.sv`. |
 | `compute/gemm_result_router.sv` | Mode-driven result router that emits quantized projection outputs and raw score/LM-head accumulators to the next stage. | Run `rtl/tb/tb_gemm_result_router.sv`. |
 | `compute/gemm_op_scheduler.sv` | Deterministic tile-loop scheduler for the GEMM-backed decoder-layer operations and LM-head-only mode. | Run `rtl/tb/tb_gemm_op_scheduler.sv`. |

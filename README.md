@@ -63,6 +63,7 @@ Project/
     README.md
     tinyllama.py
     tinyllama_gemm_int8.py
+    export_fpga_vectors.py
     model.py
     gen_test_vectors.py
   rtl/
@@ -177,6 +178,7 @@ Project/
 - `rtl/control/` now contains the verified Phase 1 control-plane skeleton, including the PC30 command/status manager stub.
 - `rtl/memory/` now contains the hardened Phase 2 memory/DMA/buffer layer, including verified router, prompt I/O, generated-token I/O, multi-beat weight/KV readers, buffered KV writeback, scale-store, KV-address, and tile-buffer smoke tests.
 - `rtl/compute/` now contains the hardened Phase 3 shared GEMM compute layer, including the MAC leaf, accumulator bank, bank-scaled requantizer, shared engine, operand/result routers, and deterministic GEMM scheduler.
+- `model/export_fpga_vectors.py` now provides the canonical golden-trace export entry point for Phase 3 arithmetic verification under `sim/golden_traces/`, including derived packed `.memh` fixtures that are consumed by the current requantize and shared-GEMM testbenches.
 - `docs/` now describe the full TinyLlama prefill/decode accelerator that the project is building toward.
 
 The current RTL is still validation infrastructure; the finalized system architecture is documented in `docs/`.

@@ -1094,6 +1094,33 @@ These notes affect the design immediately because they determine:
 - The scheduler never issues two accesses to the same bank of the same buffer
   set in one cycle.
 
+### 8.5a GEMM Lane Packing Contract
+
+- The shared GEMM engine uses a fixed row-major output-lane mapping for one
+  `M_TILE x N_TILE` tile.
+- Lane index is:
+  - `lane = m_local * N_TILE + n_local`
+- For the fixed first-implementation tile tuple:
+  - `m_local` ranges `0..15`
+  - `n_local` ranges `0..31`
+  - lane `0` is output `(0, 0)`
+  - lane `31` is output `(0, 31)`
+  - lane `32` is output `(1, 0)`
+  - lane `511` is output `(15, 31)`
+- During the K loop, each lane accumulates one output element of the tile.
+- At K-step `k_local`, the packed operand values presented to
+  `shared_gemm_engine.sv` are:
+  - `act_lane[lane] = act_tile[m_local, k_local]`
+  - `wt_lane[lane]  = wt_tile[k_local, n_local]`
+- This lane-packing rule is the contract used by:
+  - `shared_gemm_engine.sv`
+  - future trace-backed GEMM testbenches
+  - `model/export_fpga_vectors.py`
+- Partial tiles use the same mapping, but only the first
+  `active_lane_count = m_count * n_count` lanes are valid.
+- Inactive lanes are zero-filled in exported fixtures and are masked by
+  `elem_count` in RTL.
+
 ### 8.6 Prefetch, Overlap, And Issue Order
 
 - One-tile lookahead prefetch is mandatory for:

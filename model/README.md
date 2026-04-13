@@ -6,6 +6,7 @@ the FPGA accelerator project.
 The two most important files here are:
 - `tinyllama.py`: the floating-point golden reference for TinyLlama
 - `tinyllama_gemm_int8.py`: the mixed-precision GEMM-only INT8 bridge
+- `export_fpga_vectors.py`: the golden-trace exporter for RTL/HLS verification
 
 Together, they describe both:
 - what the TinyLlama decoder is supposed to do
@@ -16,6 +17,7 @@ Together, they describe both:
 
 - `tinyllama.py`: pure NumPy TinyLlama inference reference, written in a hardware-shaped style.
 - `tinyllama_gemm_int8.py`: mixed-precision INT8 bridge with `analysis` and autoregressive `generate` modes.
+- `export_fpga_vectors.py`: exports real TinyLlama golden traces under `sim/golden_traces/` for FPGA verification.
 - `model.py`: smaller quantization and FFN experiments used for early datapath work.
 - `gen_test_vectors.py`: helper script for producing simulation vectors.
 
@@ -71,6 +73,25 @@ What it does not quantize yet:
 
 This is the right intermediate step before a full FPGA implementation because it
 lets us isolate how much error comes from quantized matrix multiplies alone.
+
+## Purpose Of `export_fpga_vectors.py`
+
+`export_fpga_vectors.py` is the canonical trace exporter for FPGA verification.
+
+Its job is to:
+- run the real TinyLlama Python reference path on deterministic token sequences
+- collect model-derived tensors for selected hardware phases
+- export canonical `.npz` cases plus a `manifest.json` under `sim/golden_traces/`
+- export derived packed `.memh` fixtures for RTL testbenches
+- provide arithmetic trace cases that RTL and HLS testbenches can consume later
+
+The first implemented export scope is Phase 3:
+- shared GEMM engine traces
+- requantization traces
+
+It uses the fixed GEMM lane-packing contract from the hardware docs so the
+exported traces match the production RTL interpretation of one `M_TILE x N_TILE`
+output tile.
 
 ## TinyLlama Configuration Used By The Scripts
 

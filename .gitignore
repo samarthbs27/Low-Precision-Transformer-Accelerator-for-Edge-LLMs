@@ -16,6 +16,7 @@ sim/*.log
 sim/*.jou
 sim/*.wdb
 sim/*_smoke.cpp
+sim/golden_traces/
 
 # Python cache
 __pycache__/

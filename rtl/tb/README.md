@@ -23,8 +23,8 @@ This folder contains production TinyLlama RTL smoke tests for the new `rtl/commo
 | `tb_embedding_lmhead_dma_reader.sv` | Directed multi-mode reader smoke test for embedding beat streams, LM-head weight beats, and aggregated scale metadata. | Run the `tb_embedding_lmhead_dma_reader` command below. |
 | `tb_mac_lane.sv` | Directed arithmetic smoke test for the signed INT8xINT8->INT32 MAC leaf. | Run the `tb_mac_lane` command below. |
 | `tb_accumulator_bank.sv` | Directed stateful smoke test for 512-lane accumulator clear/load/tag behavior. | Run the `tb_accumulator_bank` command below. |
-| `tb_requantize_unit.sv` | Directed arithmetic smoke test for bank-scaled Q16.16 requantization, rounding, and clamp behavior. | Run the `tb_requantize_unit` command below. |
-| `tb_shared_gemm_engine.sv` | Directed shared-engine smoke test for accumulation, snapshot emission, and output backpressure. | Run the `tb_shared_gemm_engine` command below. |
+| `tb_requantize_unit.sv` | Directed arithmetic smoke test plus exported Phase 3 TinyLlama trace checks for bank-scaled Q16.16 requantization, rounding, and clamp behavior. | Run the `tb_requantize_unit` command below. |
+| `tb_shared_gemm_engine.sv` | Directed smoke test plus exported Phase 3 TinyLlama trace replay for shared-engine accumulation, snapshot emission, and output backpressure. | Run the `tb_shared_gemm_engine` command below. |
 | `tb_gemm_operand_router.sv` | Directed multi-mode router smoke test for Q, score, and weighted-sum operand selection. | Run the `tb_gemm_operand_router` command below. |
 | `tb_gemm_result_router.sv` | Directed multi-mode router smoke test for quantized outputs, raw score outputs, and raw LM-head outputs. | Run the `tb_gemm_result_router` command below. |
 | `tb_gemm_op_scheduler.sv` | Directed scheduler smoke test for the full decoder-layer GEMM order and LM-head-only schedule. | Run the `tb_gemm_op_scheduler` command below. |
@@ -324,6 +324,7 @@ PASS: tb_accumulator_bank
 ### `tb_requantize_unit.sv`
 
 ```powershell
+python model/export_fpga_vectors.py --phase phase3 --layer 0 --output-dir sim/golden_traces
 iverilog -g2012 -o sim/tb_requantize_unit.vvp `
   rtl/common/tinyllama_pkg.sv `
   rtl/common/tinyllama_bus_pkg.sv `
@@ -341,6 +342,7 @@ PASS: tb_requantize_unit
 ### `tb_shared_gemm_engine.sv`
 
 ```powershell
+python model/export_fpga_vectors.py --phase phase3 --layer 0 --output-dir sim/golden_traces
 iverilog -g2012 -o sim/tb_shared_gemm_engine.vvp `
   rtl/common/tinyllama_pkg.sv `
   rtl/common/tinyllama_bus_pkg.sv `
@@ -358,7 +360,7 @@ PASS: tb_shared_gemm_engine
 
 Note:
 
-The 512-lane shared-engine smoke test is the slowest local Phase 3 test under Icarus.
+The exported-trace shared-engine smoke test is the slowest local Phase 3 test under Icarus and replays a real `K_TILE=64` q-projection slice from the TinyLlama reference path.
 
 ### `tb_gemm_operand_router.sv`
 

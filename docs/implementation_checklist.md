@@ -251,6 +251,10 @@ Exit criteria:
 - GEMM core runs with real tile loops
 - accumulator clear/writeback is verified
 - operand and result routers can drive/consume the GEMM core in multiple modes
+- `model/export_fpga_vectors.py` can export at least one real Phase 3 GEMM case
+  and one real Phase 3 requantization case under `sim/golden_traces/`
+- before Phase 4 begins, `shared_gemm_engine.sv` and `requantize_unit.sv`
+  should have a path to consume exported Phase 3 trace data
 
 | Order | File | Type | Purpose | Depends on | First pass | First verification |
 |---|---|---|---|---|---|---|
@@ -377,12 +381,13 @@ This is the recommended implementation sequence in the actual coding sessions:
 2. Phase 1 utility FIFOs and control stubs
 3. Phase 2 HBM router, DMA readers/writers, and tile buffer bank
 4. Phase 3 GEMM core and requantizer
-5. Phase 4 RoPE, GQA, and causal mask
-6. Phase 5 HLS kernels and wrappers
-7. Phase 6 embedding path, FFN leaf blocks, LM head, argmax, debug mux
-8. Phase 7 decoder-layer integration
-9. Phase 8 top-level runtime integration
-10. Phase 9 golden-trace export and directed verification
+5. Minimal Phase 3 golden-trace export and arithmetic hardening
+6. Phase 4 RoPE, GQA, and causal mask
+7. Phase 5 HLS kernels and wrappers
+8. Phase 6 embedding path, FFN leaf blocks, LM head, argmax, debug mux
+9. Phase 7 decoder-layer integration
+10. Phase 8 top-level runtime integration
+11. Phase 9 expanded golden-trace export and directed verification
 
 Do not start the final top-level kernel file before Phases 1-3 compile cleanly.
 
