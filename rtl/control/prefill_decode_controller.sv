@@ -8,6 +8,8 @@ module prefill_decode_controller (
   input  runtime_mode_e      launch_mode_i,
   input  logic [COUNT_W-1:0] prompt_token_count_i,
   input  logic [COUNT_W-1:0] max_new_tokens_i,
+  input  logic               command_info_valid_i,
+  input  logic               prompt_read_done_i,
   input  logic               layer_pass_done_i,
   input  logic               lm_head_done_i,
   input  logic               token_valid_i,
@@ -26,18 +28,23 @@ module prefill_decode_controller (
   output runtime_mode_e      active_mode_o,
   output logic               prefill_active_o,
   output logic               decode_active_o,
+  output logic               prompt_read_start_o,
+  output logic               token_writer_start_o,
   output logic               embedding_start_o,
   output logic               layer_start_o,
-  output logic               lm_head_start_o
+  output logic               lm_head_start_o,
+  output logic               argmax_start_o
 );
 
   typedef enum logic [2:0] {
     CTRL_IDLE       = 3'd0,
-    CTRL_RUN_LAYERS = 3'd1,
-    CTRL_RUN_LMHEAD = 3'd2,
-    CTRL_WAIT_TOKEN = 3'd3,
-    CTRL_DONE       = 3'd4,
-    CTRL_ERROR      = 3'd5
+    CTRL_WAIT_CMD   = 3'd1,
+    CTRL_WAIT_PROMPT = 3'd2,
+    CTRL_RUN_LAYERS = 3'd3,
+    CTRL_RUN_LMHEAD = 3'd4,
+    CTRL_WAIT_TOKEN = 3'd5,
+    CTRL_DONE       = 3'd6,
+    CTRL_ERROR      = 3'd7
   } ctrl_state_e;
 
   ctrl_state_e     state_q;
@@ -58,9 +65,12 @@ module prefill_decode_controller (
     done_pulse_o      <= 1'b0;
     error_pulse_o     <= 1'b0;
     stop_valid_o      <= 1'b0;
+    prompt_read_start_o <= 1'b0;
+    token_writer_start_o <= 1'b0;
     embedding_start_o <= 1'b0;
     layer_start_o     <= 1'b0;
     lm_head_start_o   <= 1'b0;
+    argmax_start_o    <= 1'b0;
 
     if (!ap_rst_n) begin
       state_q                  <= CTRL_IDLE;
@@ -71,21 +81,59 @@ module prefill_decode_controller (
     end else begin
       unique case (state_q)
         CTRL_IDLE: begin
-          generated_token_count_q <= '0;
-          stop_reason_q           <= STOP_REASON_NONE;
-          error_code_q            <= ERROR_NONE;
-
           if (start_i) begin
             if ((launch_mode_i == MODE_PREFILL) && (prompt_token_count_i == '0)) begin
               error_code_q  <= ERROR_BAD_DESCRIPTOR;
               error_pulse_o <= 1'b1;
               state_q       <= CTRL_ERROR;
             end else begin
-              active_mode_q     <= launch_mode_i;
+              active_mode_q           <= launch_mode_i;
+              generated_token_count_q <= '0;
+              stop_reason_q           <= STOP_REASON_NONE;
+              error_code_q            <= ERROR_NONE;
+              state_q                 <= CTRL_WAIT_CMD;
+            end
+          end
+        end
+
+        CTRL_WAIT_CMD: begin
+          if (error_valid_i) begin
+            error_code_q  <= error_code_i;
+            error_pulse_o <= 1'b1;
+            state_q       <= CTRL_ERROR;
+          end else if (abort_req_i) begin
+            stop_reason_q <= STOP_REASON_HOST_ABORT;
+            stop_valid_o  <= 1'b1;
+            done_pulse_o  <= 1'b1;
+            state_q       <= CTRL_DONE;
+          end else if (command_info_valid_i) begin
+            token_writer_start_o <= 1'b1;
+
+            if (active_mode_q == MODE_PREFILL) begin
+              prompt_read_start_o <= 1'b1;
+              state_q             <= CTRL_WAIT_PROMPT;
+            end else begin
               embedding_start_o <= 1'b1;
               layer_start_o     <= 1'b1;
               state_q           <= CTRL_RUN_LAYERS;
             end
+          end
+        end
+
+        CTRL_WAIT_PROMPT: begin
+          if (error_valid_i) begin
+            error_code_q  <= error_code_i;
+            error_pulse_o <= 1'b1;
+            state_q       <= CTRL_ERROR;
+          end else if (abort_req_i) begin
+            stop_reason_q <= STOP_REASON_HOST_ABORT;
+            stop_valid_o  <= 1'b1;
+            done_pulse_o  <= 1'b1;
+            state_q       <= CTRL_DONE;
+          end else if (prompt_read_done_i) begin
+            embedding_start_o <= 1'b1;
+            layer_start_o     <= 1'b1;
+            state_q           <= CTRL_RUN_LAYERS;
           end
         end
 
@@ -105,6 +153,7 @@ module prefill_decode_controller (
               state_q      <= CTRL_DONE;
             end else begin
               lm_head_start_o <= 1'b1;
+              argmax_start_o  <= 1'b1;
               state_q         <= CTRL_RUN_LMHEAD;
             end
           end
@@ -144,10 +193,10 @@ module prefill_decode_controller (
               done_pulse_o  <= 1'b1;
               state_q       <= CTRL_DONE;
             end else begin
-              active_mode_q    <= MODE_DECODE;
+              active_mode_q     <= MODE_DECODE;
               embedding_start_o <= 1'b1;
               layer_start_o     <= 1'b1;
-              state_q          <= CTRL_RUN_LAYERS;
+              state_q           <= CTRL_RUN_LAYERS;
             end
           end
         end

@@ -114,6 +114,8 @@ Project/
       rmsnorm_wrapper.sv
       softmax_wrapper.sv
       silu_wrapper.sv
+    top/
+      tinyllama_u55c_kernel_top.sv
     tb/
       README.md
       tb_stream_fifo.sv
@@ -149,6 +151,8 @@ Project/
       tb_argmax_reduction.sv
       tb_debug_capture_mux.sv
       tb_decoder_layer_smoke.sv
+      tb_prefill_decode_smoke.sv
+      tb_kernel_top_smoke.sv
     control_fsm.sv
     top.sv
     mac_unit.sv
@@ -217,7 +221,7 @@ Project/
 - `model/` contains the TinyLlama software reference and the GEMM-only INT8 analysis/generation bridge.
 - `rtl/` contains the existing validation core for the shared GEMM engine and control FSM.
 - `rtl/common/`, `rtl/tb/`, and `hls/common/` now contain the verified Phase 0 production foundation.
-- `rtl/control/` now contains the verified Phase 1 control-plane skeleton, including the PC30 command/status manager stub.
+- `rtl/control/` now contains the verified Phase 1 control-plane skeleton, now promoted through the Phase 8 runtime path for real command-aware launch sequencing and PC30 status writeback behavior.
 - `rtl/memory/` now contains the hardened Phase 2 memory/DMA/buffer layer, including verified router, prompt I/O, generated-token I/O, multi-beat weight/KV readers, buffered KV writeback, scale-store, KV-address, and tile-buffer smoke tests.
 - `rtl/compute/` now contains the hardened Phase 3 shared GEMM compute layer, including the MAC leaf, accumulator bank, bank-scaled requantizer, shared engine, operand/result routers, and deterministic GEMM scheduler.
 - `rtl/compute/` now also contains the concrete Phase 4 attention-path leaves: the generated RoPE ROM, the real rotary datapath, the GQA router, and the pre-softmax causal-mask unit.
@@ -250,9 +254,23 @@ Project/
 - `model/export_fpga_vectors.py` writes canonical traces under `sim/golden_traces/`, emits packed `.memh` fixtures for the RTL benches, and regenerates the tracked RoPE ROM memh files under `rtl/compute/`.
 - `model/export_fpga_vectors.py` now also exports Phase 7 decoder-layer
   schedule fixtures for prefill and decode under `sim/golden_traces/phase7/rtl/`.
+- `rtl/top/tinyllama_u55c_kernel_top.sv` now provides the concrete Phase 8
+  runtime-core top-level:
+  - AXI-Lite launch/status
+  - normalized shell DMA read/write boundary
+  - PC30 command/status integration
+  - prompt read and generated-token writeback plumbing
+  - structural prompt-prefill/decode runtime bring-up
+- `rtl/tb/tb_prefill_decode_smoke.sv` and `rtl/tb/tb_kernel_top_smoke.sv`
+  now provide the Phase 8 runtime gates:
+  - exported real-model prefill/decode runtime fixtures
+  - controller-level prompt/layer/token sequencing checks
+  - top-level AXI-Lite launch plus fake shell-DMA host-I/O smoke
+- `model/export_fpga_vectors.py` now also exports Phase 8 runtime fixtures
+  under `sim/golden_traces/phase8/rtl/`.
 - `docs/` now describe the full TinyLlama prefill/decode accelerator that the project is building toward.
 
-The repo now contains hardened production modules through Phase 7 decoder-layer integration. The next milestone is Phase 8 top-level runtime integration, where the reused layer engine is wired into the full prefill/decode kernel path.
+The repo now contains hardened production modules through Phase 8 runtime-core integration. The next milestone is Phase 9 runtime acceptance and platform-facing closure: debug/runtime acceptance tightening, broader trace-backed top-level checks, and the eventual wrapper from the normalized shell DMA boundary to the real U55C platform interface.
 
 One practical note: the production RTL we are writing is intended to be
 synthesizable, but a passing Icarus smoke test is only the first gate. The

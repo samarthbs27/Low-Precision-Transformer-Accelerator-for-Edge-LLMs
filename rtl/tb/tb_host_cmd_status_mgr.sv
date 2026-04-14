@@ -136,6 +136,29 @@ module tb_host_cmd_status_mgr;
     @(negedge clk);
     start <= 1'b0;
 
+    wait_for_status_write();
+    for (int word_idx = 0; word_idx < HOST_BLOCK_WORDS; word_idx++) begin
+      status_words[word_idx] = status_write_data[word_idx*32 +: 32];
+    end
+    if (!status_words[HOST_STATUS_WORD_STATUS][STATUS_BUSY_BIT] ||
+        status_words[HOST_STATUS_WORD_STATUS][STATUS_DONE_BIT] ||
+        status_words[HOST_STATUS_WORD_STATUS][STATUS_ERROR_BIT] ||
+        status_words[HOST_STATUS_WORD_STATUS][STATUS_STOP_VALID_BIT]) begin
+      $error("launch status payload mismatch");
+      $finish;
+    end
+    if (status_words[HOST_STATUS_WORD_GEN_COUNT] != 0 ||
+        status_words[HOST_STATUS_WORD_LAST_TOKEN] != 0 ||
+        status_words[HOST_STATUS_WORD_VERSION] != RTL_VERSION_WORD) begin
+      $error("launch status data mismatch");
+      $finish;
+    end
+    status_write_desc_ready <= 1'b1;
+    status_write_data_ready <= 1'b1;
+    @(negedge clk);
+    status_write_desc_ready <= 1'b0;
+    status_write_data_ready <= 1'b0;
+
     wait_for_cmd_desc();
     if (cmd_read_desc.region != REGION_HOST_IO ||
         cmd_read_desc.write_not_read != 1'b0 ||
@@ -239,6 +262,23 @@ module tb_host_cmd_status_mgr;
       $error("command_info_valid expected LOW immediately after relaunch");
       $finish;
     end
+
+    wait_for_status_write();
+    for (int word_idx = 0; word_idx < HOST_BLOCK_WORDS; word_idx++) begin
+      status_words[word_idx] = status_write_data[word_idx*32 +: 32];
+    end
+    if (!status_words[HOST_STATUS_WORD_STATUS][STATUS_BUSY_BIT] ||
+        status_words[HOST_STATUS_WORD_STATUS][STATUS_DONE_BIT] ||
+        status_words[HOST_STATUS_WORD_STATUS][STATUS_ERROR_BIT] ||
+        status_words[HOST_STATUS_WORD_STATUS][STATUS_STOP_VALID_BIT]) begin
+      $error("relaunch status payload mismatch");
+      $finish;
+    end
+    status_write_desc_ready <= 1'b1;
+    status_write_data_ready <= 1'b1;
+    @(negedge clk);
+    status_write_desc_ready <= 1'b0;
+    status_write_data_ready <= 1'b0;
 
     wait_for_cmd_desc();
     if (cmd_read_desc.addr != cmd_base_addr) begin

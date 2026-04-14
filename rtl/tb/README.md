@@ -9,8 +9,8 @@ This folder contains production TinyLlama RTL smoke tests for the new `rtl/commo
 | `tb_stream_fifo.sv` | Directed self-check of `rtl/common/stream_fifo.sv`, including push/pop ordering, occupancy tracking, simultaneous push/pop, full-condition backpressure, and blocked-push behavior. | Run the `tb_stream_fifo` command below. |
 | `tb_descriptor_fifo.sv` | Directed self-check of `rtl/common/descriptor_fifo.sv`, including push, pop, and occupancy behavior. | Run the `tb_descriptor_fifo` command below. |
 | `tb_axi_lite_ctrl_slave.sv` | AXI-Lite plus register-file smoke test covering register writes, register reads, sticky status, clear-on-START behavior, launch mode, and abort behavior. | Run the `tb_axi_lite_ctrl_slave` command below. |
-| `tb_host_cmd_status_mgr.sv` | Fake-HBM smoke test for one-beat command fetch from PC30, one-beat terminal status writeback to PC30, and relaunch/error-only command-status behavior. | Run the `tb_host_cmd_status_mgr` command below. |
-| `tb_prefill_decode_controller.sv` | Control-path smoke test covering prefill launch, 22-layer iteration, per-layer block progression through the reused layer controller, LM-head/token handoff, EOS stop, MAX_TOKENS stop, host-abort stop, and zero-token prefill rejection. | Run the `tb_prefill_decode_controller` command below. |
+| `tb_host_cmd_status_mgr.sv` | Fake-HBM smoke test for one-beat command fetch from PC30, launch/busy status writeback, terminal status writeback, and relaunch/error-only command-status behavior. | Run the `tb_host_cmd_status_mgr` command below. |
+| `tb_prefill_decode_controller.sv` | Control-path smoke test covering command-aware prefill launch, prompt-read wait, 22-layer iteration, per-layer block progression through the reused layer controller, LM-head/token handoff, EOS stop, MAX_TOKENS stop, host-abort stop, decode-only launch, and zero-token prefill rejection. | Run the `tb_prefill_decode_controller` command below. |
 | `tb_hbm_port_router.sv` | Directed arbitration/routing smoke test for the fixed-function HBM router. | Run the `tb_hbm_port_router` command below. |
 | `tb_tile_buffer_bank.sv` | Directed ping/pong banked storage smoke test for the generic tile buffer. | Run the `tb_tile_buffer_bank` command below. |
 | `tb_prompt_token_reader.sv` | Directed host-I/O DMA smoke test for prompt token burst fetch and token stream emission. | Run the `tb_prompt_token_reader` command below. |
@@ -42,6 +42,8 @@ This folder contains production TinyLlama RTL smoke tests for the new `rtl/commo
 | `tb_argmax_reduction.sv` | Directed plus exported Phase 6 trace-backed smoke test for full-vocabulary greedy argmax with tie-break verification. | Run the `tb_argmax_reduction` command below. |
 | `tb_debug_capture_mux.sv` | Directed smoke test for layer/block filtering, lowest-index source priority, and drop-pulse behavior in the debug mux. | Run the `tb_debug_capture_mux` command below. |
 | `tb_decoder_layer_smoke.sv` | Exported Phase 7 trace-backed smoke test for one concrete decoder-layer pass, including block order, head-loop sequencing, block-driven GEMM tile counts, and operand/result routing checks. | Run the `tb_decoder_layer_smoke` command below. |
+| `tb_prefill_decode_smoke.sv` | Exported Phase 8 trace-backed runtime-control smoke for prompt prefill plus a few decode steps, including expected generated-token count, layer-pass count, and final stop reason. | Run the `tb_prefill_decode_smoke` command below. |
+| `tb_kernel_top_smoke.sv` | Exported Phase 8 top-level smoke for AXI-Lite launch, host command fetch, prompt reads, generated-token writes, final status writeback, and interrupt behavior. | Run the `tb_kernel_top_smoke` command below. |
 
 ## Smoke Tests
 
@@ -756,4 +758,67 @@ Expected pass string:
 
 ```text
 PASS: tb_debug_capture_mux
+```
+
+### `tb_prefill_decode_smoke.sv`
+
+Before running this bench, regenerate the Phase 8 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase8 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_prefill_decode_smoke.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/control/prefill_decode_controller.sv `
+  rtl/control/layer_controller.sv `
+  rtl/control/stop_condition_unit.sv `
+  rtl/tb/tb_prefill_decode_smoke.sv
+vvp sim/tb_prefill_decode_smoke.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_prefill_decode_smoke
+```
+
+### `tb_kernel_top_smoke.sv`
+
+Before running this bench, regenerate the Phase 8 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase8 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_kernel_top_smoke.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/common/stream_fifo.sv `
+  rtl/common/skid_buffer.sv `
+  rtl/common/descriptor_fifo.sv `
+  rtl/control/axi_lite_ctrl_slave.sv `
+  rtl/control/kernel_reg_file.sv `
+  rtl/control/host_cmd_status_mgr.sv `
+  rtl/control/prefill_decode_controller.sv `
+  rtl/control/layer_controller.sv `
+  rtl/control/stop_condition_unit.sv `
+  rtl/memory/hbm_port_router.sv `
+  rtl/memory/prompt_token_reader.sv `
+  rtl/memory/generated_token_writer.sv `
+  rtl/top/tinyllama_u55c_kernel_top.sv `
+  rtl/tb/tb_kernel_top_smoke.sv
+vvp sim/tb_kernel_top_smoke.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_kernel_top_smoke
 ```

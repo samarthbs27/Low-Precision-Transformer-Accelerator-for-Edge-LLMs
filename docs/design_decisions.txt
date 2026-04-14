@@ -208,6 +208,19 @@ A14. On-chip controller replaces per-GEMM host sequencing
       expands one logical GEMM block into its tile loop
     - the older full-layer `start_i` scheduler path is retained only for the
       isolated Phase 3 scheduler smoke test
+  The frozen Phase 8 runtime split is:
+    - `host_cmd_status_mgr.sv` fetches the one-beat PC30 command block before
+      runtime launch and exposes the parsed prompt/ring-buffer addresses
+    - `prefill_decode_controller.sv` waits for `command_info_valid` before
+      launching downstream work
+    - prefill launch pulses `prompt_read_start`, waits for
+      `prompt_read_done`, then starts the layer engine
+    - decode-only launch skips the prompt reader and starts the layer engine
+      immediately after command decode
+    - after each layer pass that requires token selection,
+      `lm_head_start` and `argmax_start` pulse together
+    - runtime-visible done/error/stop state is retained until a new launch
+      clears it
 
 A15. Throughput target and engine width
   The implementation target is a 512-lane INT8 GEMM engine on U55C.
@@ -418,8 +431,8 @@ B10. PC30 host command/status block layout
     - word 7: RTL_VERSION
   `host_cmd_status_mgr.sv` reads the command beat from `cmd_base_addr` on every
   launch, exposes the parsed prompt/ring-buffer addresses to downstream blocks,
-  and writes one status beat to `status_base_addr` when terminal status changes
-  occur.
+  writes one launch/busy status beat to `status_base_addr` on `start`, and
+  writes one terminal status beat when done/error/stop status changes occur.
   The host software and FPGA runtime must both follow this exact layout.
 
 B11. Internal DMA descriptor contract
@@ -440,6 +453,16 @@ B11. Internal DMA descriptor contract
   `byte_count` is fixed to 32 bits because full KV-cache transfers can exceed
   65535 bytes.
 
+B11a. Phase 8 top-level runtime boundary
+  The current user-RTL top-level runtime boundary is fixed to:
+    - AXI-Lite control/status
+    - one normalized internal shell DMA read interface
+    - one normalized internal shell DMA write interface
+  `tinyllama_u55c_kernel_top.sv` does not yet expose the raw
+  `m_axi_pc00..m_axi_pc31` pseudo-channel ports directly.
+  The actual platform-facing AXI shell binding is treated as a wrapper concern
+  around the normalized shell DMA boundary.
+
 B12. Verification policy and golden-trace usage
   Directed smoke tests remain mandatory for control, routing, DMA, and storage
   modules.
@@ -451,6 +474,9 @@ B12. Verification policy and golden-trace usage
     docs/golden_trace_plan.md
   The canonical export root is fixed to:
     sim/golden_traces/
+  The concrete Phase 8 integration gate uses an exported prefill+decode runtime
+  case with expected prompt-read beat count, generated-token count, and final
+  host-visible status payload.
 
 ---
 

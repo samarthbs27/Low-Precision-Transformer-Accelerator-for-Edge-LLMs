@@ -345,15 +345,17 @@ Exit criteria:
 - prompt prefill path exists
 - decode loop exists
 - FPGA-side stop condition closes the loop
-- top-level kernel compiles structurally
+- top-level runtime core compiles and passes the focused smoke benches
+- exported Phase 8 runtime fixtures drive both the controller-level and
+  top-level runtime smokes
 
 | Order | File | Type | Purpose | Depends on | First pass | First verification |
 |---|---|---|---|---|---|---|
-| 8.1 | `rtl/top/tinyllama_u55c_kernel_top.sv` | RTL | Final kernel top-level | everything | structural wiring only | compile-only top-level build |
-| 8.2 | `rtl/tb/tb_prefill_decode_smoke.sv` | TB | Smoke test for prompt prefill plus a few decode steps with stubs | top-level dependencies except HLS accuracy | deterministic token-flow smoke | run after top-level wiring |
-| 8.3 | `rtl/tb/tb_kernel_top_smoke.sv` | TB | Top-level kernel smoke including AXI-Lite launch and fake HBM model | top-level, control, memory | end-to-end structural smoke | run after full compile |
-| 8.4 | `rtl/control/prefill_decode_controller.sv` | RTL update | Promote from state stub to real runtime controller | host/status, layer controller, stop unit | real state sequencing | prefill/decode smoke TB |
-| 8.5 | `rtl/control/host_cmd_status_mgr.sv` | RTL update | Promote from descriptor stub to real command/status path | router, FIFOs | real status updates | top-level smoke TB |
+| 8.1 | `rtl/top/tinyllama_u55c_kernel_top.sv` | RTL | Phase 8 runtime-core top-level with AXI-Lite plus normalized shell DMA boundary | everything | structural runtime wiring with deterministic LM/token stub | `rtl/tb/tb_kernel_top_smoke.sv` |
+| 8.2 | `rtl/tb/tb_prefill_decode_smoke.sv` | TB | Trace-backed runtime-control smoke for prefill plus a few decode steps | controller, layer controller, stop unit, Phase 8 export fixtures | exported prefill/decode control smoke | run after Phase 8 fixture export |
+| 8.3 | `rtl/tb/tb_kernel_top_smoke.sv` | TB | Top-level runtime smoke including AXI-Lite launch and fake shell DMA model | top-level, control, memory, Phase 8 export fixtures | end-to-end structural smoke | run after full compile |
+| 8.4 | `rtl/control/prefill_decode_controller.sv` | RTL update | Promote from state stub to real runtime controller | host/status, layer controller, stop unit | command-aware prompt/decode sequencing | `rtl/tb/tb_prefill_decode_controller.sv` and `rtl/tb/tb_prefill_decode_smoke.sv` |
+| 8.5 | `rtl/control/host_cmd_status_mgr.sv` | RTL update | Promote from descriptor stub to real command/status path | router, FIFOs | launch-status plus terminal-status writeback | `rtl/tb/tb_host_cmd_status_mgr.sv` and `rtl/tb/tb_kernel_top_smoke.sv` |
 
 ## Phase 9 - Verification Collateral And Golden Traces
 

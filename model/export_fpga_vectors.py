@@ -10,6 +10,7 @@ The current implementation exports deterministic cases for:
 - Phase 5 nonlinear kernels and wrappers
 - Phase 6 embedding / FFN / LM-head leaves
 - Phase 7 decoder-layer integration schedule fixtures
+- Phase 8 runtime prompt/decode integration fixtures
 
 Trace outputs are written under:
   sim/golden_traces/
@@ -36,6 +37,7 @@ PHASE4 = "phase4"
 PHASE5 = "phase5"
 PHASE6 = "phase6"
 PHASE7 = "phase7"
+PHASE8 = "phase8"
 
 M_TILE = 16
 N_TILE = 32
@@ -44,6 +46,12 @@ ACC_VECTOR_ELEMS = GEMM_LANES
 SCALE_VECTOR_ELEMS = 16
 DMA_BEAT_BYTES = 32
 DMA_BEAT_W = DMA_BEAT_BYTES * 8
+HOST_BLOCK_WORDS = DMA_BEAT_W // 32
+HOST_CMD_WORD_PROMPT_BASE_LO = 0
+HOST_CMD_WORD_PROMPT_BASE_HI = 1
+HOST_CMD_WORD_GEN_BASE_LO = 2
+HOST_CMD_WORD_GEN_BASE_HI = 3
+HOST_CMD_WORD_GEN_CAPACITY = 4
 Q16_16_FRAC_BITS = 16
 K_TILE = 64
 SCORE_Q_TILE = 16
@@ -96,6 +104,14 @@ GEMM_GATE = 7
 GEMM_UP = 8
 GEMM_DOWN = 9
 GEMM_LM_HEAD = 10
+
+STOP_REASON_NONE = 0
+STOP_REASON_EOS = 1
+STOP_REASON_MAX_TOKENS = 2
+STOP_REASON_HOST_ABORT = 3
+STOP_REASON_INTERNAL_ERR = 4
+
+STATUS_STOP_REASON_LSB = 4
 
 DEFAULT_PREFILL_TOKEN_IDS = ",".join(str(i) for i in range(1, 17))
 DEFAULT_DECODE_TOKEN_IDS = "1"
@@ -2527,6 +2543,174 @@ def export_phase7_cases(
     return manifest_path
 
 
+def build_phase8_runtime_case(
+    *,
+    prefill_token_ids: list[int],
+    max_new_tokens: int,
+    weights: ref.TinyLlamaWeights,
+    output_root: Path,
+    manifest_entries: list[dict[str, Any]],
+) -> None:
+    if max_new_tokens <= 0:
+        raise ValueError("Phase 8 runtime trace requires max_new_tokens > 0")
+
+    cos, sin = ref.build_rope_cache(
+        seq_len=weights.cfg["max_position_embeddings"],
+        head_dim=weights.cfg["head_dim"],
+        rope_theta=weights.cfg["rope_theta"],
+    )
+
+    runtime_token_ids = list(prefill_token_ids)
+    generated_token_ids: list[int] = []
+    for _ in range(max_new_tokens):
+        logits = ref.forward(runtime_token_ids, weights, cos, sin)
+        next_token = int(np.argmax(logits[-1]))
+        generated_token_ids.append(next_token)
+        runtime_token_ids.append(next_token)
+
+    prompt_count = len(prefill_token_ids)
+    generated_count = len(generated_token_ids)
+    generated_capacity = max(8, generated_count + 2)
+    eos_token_id = 0xFFFFFFFF
+    cmd_base_addr = np.uint64(0x0000_0000_0000_1000)
+    status_base_addr = np.uint64(0x0000_0000_0000_2000)
+    prompt_base_addr = np.uint64(0x0000_0000_0000_4000)
+    generated_base_addr = np.uint64(0x0000_0000_0000_8000)
+    expected_layer_passes = 1 + max(0, generated_count - 1)
+    expected_prompt_beats = ceil_div(prompt_count, DMA_BEAT_BYTES // 4)
+    final_status_word = (
+        (1 << 1)
+        | (1 << 3)
+        | (STOP_REASON_MAX_TOKENS << STATUS_STOP_REASON_LSB)
+    )
+
+    command_words = np.zeros(HOST_BLOCK_WORDS, dtype=np.uint32)
+    command_words[HOST_CMD_WORD_PROMPT_BASE_LO] = np.uint32(int(prompt_base_addr) & 0xFFFFFFFF)
+    command_words[HOST_CMD_WORD_PROMPT_BASE_HI] = np.uint32((int(prompt_base_addr) >> 32) & 0xFFFFFFFF)
+    command_words[HOST_CMD_WORD_GEN_BASE_LO] = np.uint32(int(generated_base_addr) & 0xFFFFFFFF)
+    command_words[HOST_CMD_WORD_GEN_BASE_HI] = np.uint32((int(generated_base_addr) >> 32) & 0xFFFFFFFF)
+    command_words[HOST_CMD_WORD_GEN_CAPACITY] = np.uint32(generated_capacity)
+
+    case_id = f"{PHASE8}_prefill_decode_runtime"
+    case_path = output_root / PHASE8 / f"{case_id}.npz"
+    ensure_dir(case_path.parent)
+
+    np.savez(
+        case_path,
+        prompt_token_ids=np.asarray(prefill_token_ids, dtype=np.uint32),
+        generated_token_ids=np.asarray(generated_token_ids, dtype=np.uint32),
+        command_words=command_words,
+        prompt_count=np.asarray([prompt_count], dtype=np.uint32),
+        max_new_tokens=np.asarray([max_new_tokens], dtype=np.uint32),
+        eos_token_id=np.asarray([eos_token_id], dtype=np.uint32),
+        generated_capacity=np.asarray([generated_capacity], dtype=np.uint32),
+        cmd_base_addr=np.asarray([cmd_base_addr], dtype=np.uint64),
+        status_base_addr=np.asarray([status_base_addr], dtype=np.uint64),
+        prompt_base_addr=np.asarray([prompt_base_addr], dtype=np.uint64),
+        generated_base_addr=np.asarray([generated_base_addr], dtype=np.uint64),
+        expected_generated_count=np.asarray([generated_count], dtype=np.uint32),
+        expected_last_token=np.asarray([generated_token_ids[-1]], dtype=np.uint32),
+        expected_stop_reason=np.asarray([STOP_REASON_MAX_TOKENS], dtype=np.uint32),
+        expected_layer_passes=np.asarray([expected_layer_passes], dtype=np.uint32),
+        expected_prompt_beats=np.asarray([expected_prompt_beats], dtype=np.uint32),
+        expected_final_status_word=np.asarray([final_status_word], dtype=np.uint32),
+    )
+
+    rtl_root = output_root / PHASE8 / "rtl"
+    fixture_base = rtl_root / case_id
+    write_hex_memh(
+        fixture_base.with_suffix(".meta.memh"),
+        np.asarray(
+            [
+                int(cmd_base_addr) & 0xFFFFFFFF,
+                (int(cmd_base_addr) >> 32) & 0xFFFFFFFF,
+                int(status_base_addr) & 0xFFFFFFFF,
+                (int(status_base_addr) >> 32) & 0xFFFFFFFF,
+                prompt_count,
+                max_new_tokens,
+                eos_token_id,
+                generated_capacity,
+                expected_layer_passes,
+                expected_prompt_beats,
+                generated_count,
+                final_status_word,
+            ],
+            dtype=np.uint32,
+        ),
+        bits=32,
+        signed=False,
+    )
+    write_hex_memh(
+        fixture_base.with_suffix(".command_words.memh"),
+        command_words,
+        bits=32,
+        signed=False,
+    )
+    write_hex_memh(
+        fixture_base.with_suffix(".prompt_tokens.memh"),
+        np.asarray(prefill_token_ids, dtype=np.uint32),
+        bits=32,
+        signed=False,
+    )
+    write_hex_memh(
+        fixture_base.with_suffix(".generated_tokens_expected.memh"),
+        np.asarray(generated_token_ids, dtype=np.uint32),
+        bits=32,
+        signed=False,
+    )
+
+    manifest_entries.append(
+        {
+            "case_id": case_id,
+            "phase": PHASE8,
+            "block": "prefill_decode_runtime",
+            "path": str(case_path.as_posix()),
+            "prompt_count": prompt_count,
+            "max_new_tokens": max_new_tokens,
+            "generated_count": generated_count,
+            "expected_stop_reason": int(STOP_REASON_MAX_TOKENS),
+            "rtl_fixture_base": str(fixture_base.as_posix()),
+        }
+    )
+
+
+def export_phase8_cases(
+    *,
+    weights_path: str,
+    prefill_token_ids: list[int],
+    output_dir: str,
+    source_root: Path,
+) -> Path:
+    output_root = Path(output_dir)
+    ensure_dir(output_root / PHASE8)
+
+    weights = ref.load_weights(weights_path, compute_dtype=np.float32, cache_arrays=False)
+    manifest_entries: list[dict[str, Any]] = []
+    build_phase8_runtime_case(
+        prefill_token_ids=prefill_token_ids,
+        max_new_tokens=2,
+        weights=weights,
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+
+    manifest = {
+        "trace_format_version": 1,
+        "phase": PHASE8,
+        "model_id": weights.cfg["model_id"],
+        "weights_path": weights_path,
+        "prefill_token_ids": prefill_token_ids,
+        "source_root": str(source_root.as_posix()),
+        "cases": manifest_entries,
+    }
+
+    manifest_path = output_root / "manifest.json"
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+        handle.write("\n")
+    return manifest_path
+
+
 def export_phase3_for_tokens(
     *,
     runtime_mode: str,
@@ -2653,7 +2837,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--phase",
-        choices=[PHASE3, PHASE4, PHASE5, PHASE6, PHASE7],
+        choices=[PHASE3, PHASE4, PHASE5, PHASE6, PHASE7, PHASE8],
         default=PHASE3,
         help="Trace-export phase.",
     )
@@ -2726,12 +2910,19 @@ def main() -> None:
             output_dir=args.output_dir,
             source_root=Path(__file__).resolve().parent.parent,
         )
-    else:
+    elif args.phase == PHASE7:
         manifest_path = export_phase7_cases(
             weights_path=args.weights,
             layer=args.layer,
             prefill_token_ids=prefill_token_ids,
             decode_context_token_ids=decode_token_ids,
+            output_dir=args.output_dir,
+            source_root=Path(__file__).resolve().parent.parent,
+        )
+    else:
+        manifest_path = export_phase8_cases(
+            weights_path=args.weights,
+            prefill_token_ids=prefill_token_ids,
             output_dir=args.output_dir,
             source_root=Path(__file__).resolve().parent.parent,
         )

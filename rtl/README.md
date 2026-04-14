@@ -42,8 +42,8 @@ These are the first production control-path modules now implemented under `rtl/c
 |------|------------|------------|
 | `control/axi_lite_ctrl_slave.sv` | AXI4-Lite front-end that translates host register reads and writes into the internal register-file interface. | Run `rtl/tb/tb_axi_lite_ctrl_slave.sv`. |
 | `control/kernel_reg_file.sv` | Concrete launch/status register file with the frozen control-register map, sticky status bits, and command outputs. | Run `rtl/tb/tb_axi_lite_ctrl_slave.sv`. |
-| `control/host_cmd_status_mgr.sv` | Stub PC30 command/status DMA manager that fetches one command beat per launch and writes one status beat on terminal events. | Run `rtl/tb/tb_host_cmd_status_mgr.sv`. |
-| `control/prefill_decode_controller.sv` | Runtime controller stub for `IDLE -> prefill/decode layer pass -> LM head -> token/stop -> DONE`. | Run `rtl/tb/tb_prefill_decode_controller.sv`. |
+| `control/host_cmd_status_mgr.sv` | Concrete PC30 command/status DMA manager that fetches one command beat per launch, writes one launch/busy status beat on `START`, and writes one terminal status beat on done/error/stop. | Run `rtl/tb/tb_host_cmd_status_mgr.sv` and `rtl/tb/tb_kernel_top_smoke.sv`. |
+| `control/prefill_decode_controller.sv` | Runtime controller for `wait command -> prompt read (prefill only) -> layer pass -> LM head/argmax -> token/stop`. | Run `rtl/tb/tb_prefill_decode_controller.sv` and `rtl/tb/tb_prefill_decode_smoke.sv`. |
 | `control/layer_controller.sv` | Reused 22-layer controller that now emits the real per-layer `block_start/block_id/q_head_id/kv_head_id` schedule for the fixed decoder-layer block order. | Run `rtl/tb/tb_prefill_decode_controller.sv` and `rtl/tb/tb_decoder_layer_smoke.sv`. |
 | `control/stop_condition_unit.sv` | Stop-condition block for EOS, max-token, and host-abort termination. | Run `rtl/tb/tb_prefill_decode_controller.sv`. |
 
@@ -129,6 +129,17 @@ These Phase 7 integration files now harden the reused decoder-layer path.
 | `compute/gemm_operand_router.sv` | Integration-ready operand router used by the decoder-layer smoke path to validate the correct source pair for projection, score, and weighted-sum GEMMs. | Run `rtl/tb/tb_decoder_layer_smoke.sv`. |
 | `compute/gemm_result_router.sv` | Integration-ready result router used by the decoder-layer smoke path to validate quantized-vs-raw score/LM-head routing. | Run `rtl/tb/tb_decoder_layer_smoke.sv`. |
 | `tb/tb_decoder_layer_smoke.sv` | Exported Phase 7 trace-backed smoke test for one concrete decoder-layer pass at real TinyLlama dimensions and prefill/decode token counts. | Regenerate the Phase 7 fixtures, then run `rtl/tb/tb_decoder_layer_smoke.sv`. |
+
+## Phase 8 Runtime-Core Integration
+
+These Phase 8 files now harden the top-level runtime shell around the reused
+decoder-layer engine.
+
+| File | What it is | Smoke test |
+|------|------------|------------|
+| `top/tinyllama_u55c_kernel_top.sv` | Phase 8 runtime-core top-level with AXI-Lite control, normalized shell DMA read/write boundary, PC30 command/status handling, prompt-token fetch, generated-token writeback, and structural prompt-prefill/decode control integration. | Run `rtl/tb/tb_kernel_top_smoke.sv`. |
+| `tb/tb_prefill_decode_smoke.sv` | Exported Phase 8 trace-backed runtime-control smoke for prefill plus a few decode steps using the real TinyLlama reference to generate expected token IDs and runtime counts. | Regenerate the Phase 8 fixtures, then run `rtl/tb/tb_prefill_decode_smoke.sv`. |
+| `tb/tb_kernel_top_smoke.sv` | Exported Phase 8 top-level smoke for AXI-Lite launch, PC30 command fetch, prompt read beats, generated-token writes, final status payload, and interrupt observation against a fake shell DMA model. | Regenerate the Phase 8 fixtures, then run `rtl/tb/tb_kernel_top_smoke.sv`. |
 
 ## Synthesis Readiness
 

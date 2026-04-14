@@ -45,14 +45,17 @@ module host_cmd_status_mgr (
   logic [DMA_BEAT_W-1:0] status_payload_q;
   logic        status_desc_pending_q;
   logic        status_data_pending_q;
-  logic        status_done_event;
-  logic        status_error_event;
-  logic        status_stop_event;
-  stop_reason_e status_stop_reason_event;
-  error_code_e  status_error_code_event;
+  logic        terminal_done_event;
+  logic        terminal_error_event;
+  logic        terminal_stop_event;
+  stop_reason_e terminal_stop_reason_event;
+  error_code_e  terminal_error_code_event;
 
-  logic [31:0] status_words [0:HOST_BLOCK_WORDS-1];
+  logic [31:0] launch_status_words [0:HOST_BLOCK_WORDS-1];
+  logic [31:0] terminal_status_words [0:HOST_BLOCK_WORDS-1];
   logic [31:0] cmd_words [0:HOST_BLOCK_WORDS-1];
+  logic [DMA_BEAT_W-1:0] launch_status_payload_w;
+  logic [DMA_BEAT_W-1:0] terminal_status_payload_w;
 
   assign cmd_read_desc_o.region         = REGION_HOST_IO;
   assign cmd_read_desc_o.tensor_id      = TENSOR_NONE;
@@ -81,20 +84,20 @@ module host_cmd_status_mgr (
   assign status_write_desc_valid_o = status_desc_pending_q;
   assign status_write_data_valid_o = status_data_pending_q;
   assign status_write_data_o       = status_payload_q;
-  assign status_done_event         = status_done_sticky_q  || done_pulse_i;
-  assign status_error_event        = status_error_sticky_q || error_valid_i;
-  assign status_stop_event         = status_stop_sticky_q  || stop_valid_i;
+  assign terminal_done_event       = status_done_sticky_q  || done_pulse_i;
+  assign terminal_error_event      = status_error_sticky_q || error_valid_i;
+  assign terminal_stop_event       = status_stop_sticky_q  || stop_valid_i;
 
   always_comb begin
-    status_stop_reason_event = status_stop_reason_q;
-    status_error_code_event  = status_error_code_q;
+    terminal_stop_reason_event = status_stop_reason_q;
+    terminal_error_code_event  = status_error_code_q;
 
     if (stop_valid_i) begin
-      status_stop_reason_event = stop_reason_i;
+      terminal_stop_reason_event = stop_reason_i;
     end
 
     if (error_valid_i) begin
-      status_error_code_event = error_code_i;
+      terminal_error_code_event = error_code_i;
     end
 
     for (int word_idx = 0; word_idx < HOST_BLOCK_WORDS; word_idx++) begin
@@ -102,20 +105,35 @@ module host_cmd_status_mgr (
     end
 
     for (int word_idx = 0; word_idx < HOST_BLOCK_WORDS; word_idx++) begin
-      status_words[word_idx] = '0;
+      launch_status_words[word_idx] = '0;
+      terminal_status_words[word_idx] = '0;
     end
 
-    status_words[HOST_STATUS_WORD_STATUS][STATUS_BUSY_BIT] = busy_i;
-    status_words[HOST_STATUS_WORD_STATUS][STATUS_DONE_BIT] = status_done_event;
-    status_words[HOST_STATUS_WORD_STATUS][STATUS_ERROR_BIT] = status_error_event;
-    status_words[HOST_STATUS_WORD_STATUS][STATUS_STOP_VALID_BIT] = status_stop_event;
-    status_words[HOST_STATUS_WORD_STATUS][STATUS_STOP_REASON_MSB:STATUS_STOP_REASON_LSB] = status_stop_reason_event;
-    status_words[HOST_STATUS_WORD_STATUS][STATUS_ERROR_CODE_MSB:STATUS_ERROR_CODE_LSB] = status_error_code_event;
-    status_words[HOST_STATUS_WORD_GEN_COUNT] = generated_token_count_i;
-    status_words[HOST_STATUS_WORD_LAST_TOKEN] = last_token_id_i;
-    status_words[HOST_STATUS_WORD_CUR_LAYER] = {{(32-LAYER_ID_W){1'b0}}, current_layer_i};
-    status_words[HOST_STATUS_WORD_CUR_BLOCK] = {{(32-BLOCK_ID_W){1'b0}}, current_block_i};
-    status_words[HOST_STATUS_WORD_VERSION] = RTL_VERSION_WORD;
+    launch_status_words[HOST_STATUS_WORD_STATUS][STATUS_BUSY_BIT] = 1'b1;
+    launch_status_words[HOST_STATUS_WORD_GEN_COUNT] = '0;
+    launch_status_words[HOST_STATUS_WORD_LAST_TOKEN] = '0;
+    launch_status_words[HOST_STATUS_WORD_CUR_LAYER] = '0;
+    launch_status_words[HOST_STATUS_WORD_CUR_BLOCK] = '0;
+    launch_status_words[HOST_STATUS_WORD_VERSION] = RTL_VERSION_WORD;
+
+    terminal_status_words[HOST_STATUS_WORD_STATUS][STATUS_BUSY_BIT] = 1'b0;
+    terminal_status_words[HOST_STATUS_WORD_STATUS][STATUS_DONE_BIT] = terminal_done_event;
+    terminal_status_words[HOST_STATUS_WORD_STATUS][STATUS_ERROR_BIT] = terminal_error_event;
+    terminal_status_words[HOST_STATUS_WORD_STATUS][STATUS_STOP_VALID_BIT] = terminal_stop_event;
+    terminal_status_words[HOST_STATUS_WORD_STATUS][STATUS_STOP_REASON_MSB:STATUS_STOP_REASON_LSB] = terminal_stop_reason_event;
+    terminal_status_words[HOST_STATUS_WORD_STATUS][STATUS_ERROR_CODE_MSB:STATUS_ERROR_CODE_LSB] = terminal_error_code_event;
+    terminal_status_words[HOST_STATUS_WORD_GEN_COUNT] = generated_token_count_i;
+    terminal_status_words[HOST_STATUS_WORD_LAST_TOKEN] = last_token_id_i;
+    terminal_status_words[HOST_STATUS_WORD_CUR_LAYER] = {{(32-LAYER_ID_W){1'b0}}, current_layer_i};
+    terminal_status_words[HOST_STATUS_WORD_CUR_BLOCK] = {{(32-BLOCK_ID_W){1'b0}}, current_block_i};
+    terminal_status_words[HOST_STATUS_WORD_VERSION] = RTL_VERSION_WORD;
+
+    launch_status_payload_w = '0;
+    terminal_status_payload_w = '0;
+    for (int word_idx = 0; word_idx < HOST_BLOCK_WORDS; word_idx++) begin
+      launch_status_payload_w[word_idx*AXIL_DATA_W +: AXIL_DATA_W] = launch_status_words[word_idx];
+      terminal_status_payload_w[word_idx*AXIL_DATA_W +: AXIL_DATA_W] = terminal_status_words[word_idx];
+    end
   end
 
   always_ff @(posedge ap_clk) begin
@@ -144,6 +162,9 @@ module host_cmd_status_mgr (
         status_stop_sticky_q   <= 1'b0;
         status_stop_reason_q   <= STOP_REASON_NONE;
         status_error_code_q    <= ERROR_NONE;
+        status_payload_q       <= launch_status_payload_w;
+        status_desc_pending_q  <= 1'b1;
+        status_data_pending_q  <= 1'b1;
       end
 
       if (cmd_read_desc_valid_o && cmd_read_desc_ready_i) begin
@@ -174,9 +195,7 @@ module host_cmd_status_mgr (
       end
 
       if (done_pulse_i || error_valid_i || stop_valid_i) begin
-        for (int word_idx = 0; word_idx < HOST_BLOCK_WORDS; word_idx++) begin
-          status_payload_q[word_idx*AXIL_DATA_W +: AXIL_DATA_W] <= status_words[word_idx];
-        end
+        status_payload_q       <= terminal_status_payload_w;
         status_desc_pending_q <= 1'b1;
         status_data_pending_q <= 1'b1;
       end

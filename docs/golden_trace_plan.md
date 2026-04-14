@@ -156,6 +156,27 @@ Those fixtures currently carry:
 - expected GEMM mode per block
 - expected GEMM tile-step count per block
 
+Phase 8 exports also write packed RTL fixtures under:
+
+```text
+sim/golden_traces/phase8/rtl/
+```
+
+Those fixtures currently carry:
+
+- command-base and status-base address words
+- prompt count
+- `max_new_tokens`
+- `eos_token_id`
+- generated-token ring capacity
+- expected layer-pass count
+- expected prompt-read beat count
+- expected generated-token count
+- expected final status word
+- one command beat image
+- one prompt-token list image
+- expected generated-token ID list
+
 ---
 
 ## 5. Canonical Export Format
@@ -397,6 +418,16 @@ Current implemented export scope:
     - `tb_residual_add.sv`
     - `tb_elementwise_mul.sv`
     - `tb_argmax_reduction.sv`
+- Phase 7:
+  - prefill decoder-layer schedule fixtures
+  - decode decoder-layer schedule fixtures
+  - generated packed `.memh` fixtures for:
+    - `tb_decoder_layer_smoke.sv`
+- Phase 8:
+  - one real-model prefill-plus-decode runtime case
+  - generated packed `.memh` fixtures for:
+    - `tb_prefill_decode_smoke.sv`
+    - `tb_kernel_top_smoke.sv`
 
 Expected later command shape:
 
@@ -423,6 +454,8 @@ The project should use the following gates:
   decoder-layer integration must pass at least one exported layer trace
 - Phase 8:
   runtime integration must pass at least one exported prefill+decode trace
+  and one top-level AXI-Lite plus host-I/O smoke driven by the same exported
+  fixture set
 - Phase 9:
   debug capture and top-level smoke must line up with exported expected values
 

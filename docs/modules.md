@@ -96,7 +96,12 @@ Expected control-register fields:
 
 ### 2.3 HBM Memory Buses
 
-- `m_axi_pc00` .. `m_axi_pc31`: AXI4 master ports to U55C HBM pseudo-channels
+- deployed platform shell: `m_axi_pc00` .. `m_axi_pc31`
+- current user-RTL top-level boundary:
+  - `shell_rd_desc_*`
+  - `shell_rd_data_*`
+  - `shell_wr_desc_*`
+  - `shell_wr_data_*`
 
 Fixed HBM allocation:
 
@@ -233,15 +238,18 @@ hardware implementation.
 
 - Language: SystemVerilog RTL
 - Physical instances: 1
-- Purpose: Top-level RTL kernel. Instantiates control, memory, buffering,
-  shared compute, HLS wrappers, and debug.
+- Purpose: Top-level runtime core. Instantiates AXI-Lite control, PC30
+  command/status flow, prompt I/O, the reused layer engine path, and the
+  normalized shell DMA boundary used by the current runtime-integration smoke
+  tests.
 - Inputs / buses:
   - `ap_clk`, `ap_rst_n`
   - `s_axi_control`
-  - `m_axi_pc00` .. `m_axi_pc31`
+  - normalized shell DMA read/write ready and read-data return
 - Outputs / buses:
   - `interrupt`
   - host-visible status through `s_axi_control`
+  - normalized shell DMA read/write descriptors and write payloads
 - Parallelism:
   - structural only; all system-level parallelism is created by child modules
     and overlapped DMA/compute pipelines.
@@ -289,7 +297,9 @@ hardware implementation.
 - Outputs / buses:
   - parsed prompt-token-base, generated-token-ring-base, and generated-token
     capacity fields to downstream runtime blocks
-  - one-beat status-write descriptor and one-beat status payload to
+  - one-beat launch/busy status-write descriptor and payload to
+    `hbm_port_router.sv`
+  - one-beat terminal status-write descriptor and payload to
     `hbm_port_router.sv`
 - Parallelism:
   - no arithmetic parallelism; pipelined command/status DMA.
@@ -299,7 +309,8 @@ hardware implementation.
 - Language: SystemVerilog RTL
 - Physical instances: 1
 - Purpose: Owns the high-level runtime flow:
-  `embedding -> prefill -> decode loop -> LM head -> argmax -> stop`.
+  `wait for command -> prompt read (prefill only) -> layer pass -> LM head /
+  argmax -> stop-or-next-decode-step`.
 - Inputs / buses:
   - command/config from `kernel_reg_file.sv` and `host_cmd_status_mgr.sv`
   - token-emission status from `argmax_reduction.sv`
@@ -307,6 +318,15 @@ hardware implementation.
 - Outputs / buses:
   - mode, layer-start, block-start, and loop-control signals
   - generated token count and stop control to `stop_condition_unit.sv`
+- Concrete contract:
+  - waits for `command_info_valid` before launching downstream runtime work
+  - prefill launch pulses `prompt_read_start` and waits for
+    `prompt_read_done` before starting layers
+  - decode-only launch skips prompt-read and starts layers immediately after
+    command decode
+  - pulses `token_writer_start` once per launch before emitted-token writeback
+  - pulses `lm_head_start` and `argmax_start` together after each completed
+    layer pass that requires token selection
 - Parallelism:
   - control parallelism only; overlaps DMA launch with downstream compute.
 
@@ -1497,5 +1517,10 @@ The policy is fixed as:
    - Every math or dataflow block must gain at least one trace-backed test.
 
 4. Phase 7, Phase 8, and Phase 9
-   - Integration must be checked against exported decoder-layer, prefill/decode,
-     and LM-head traces before the phase is treated as hardened.
+  - Integration must be checked against exported decoder-layer, prefill/decode,
+    and LM-head traces before the phase is treated as hardened.
+  - The current Phase 8 runtime gate is:
+    - `tb_prefill_decode_smoke.sv` for exported real-model prefill/decode
+      control flow
+    - `tb_kernel_top_smoke.sv` for AXI-Lite launch, host command fetch, prompt
+      beat count, generated-token writeback, and final status payload
