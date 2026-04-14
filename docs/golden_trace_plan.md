@@ -366,6 +366,18 @@ Current implemented export scope:
     - `tb_rmsnorm_wrapper.sv`
     - `tb_softmax_wrapper.sv`
     - `tb_silu_wrapper.sv`
+- Phase 6:
+  - prefill and decode embedding-lookup row cases
+  - prefill and decode embedding-quantizer batch cases
+  - prefill and decode residual-add cases
+  - prefill and decode SwiGLU multiply cases for layer 0
+  - prefill and decode final-logit argmax cases
+  - generated packed `.memh` fixtures for:
+    - `tb_embedding_lookup.sv`
+    - `tb_embedding_quantizer.sv`
+    - `tb_residual_add.sv`
+    - `tb_elementwise_mul.sv`
+    - `tb_argmax_reduction.sv`
 
 Expected later command shape:
 

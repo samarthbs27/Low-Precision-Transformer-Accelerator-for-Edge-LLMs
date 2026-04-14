@@ -94,7 +94,6 @@ module silu_wrapper (
       end else begin
         numerator_abs = value_q16;
       end
-      numerator_abs = numerator_abs <<< 16;
       quotient_mag = numerator_abs / denominator;
       remainder_mag = numerator_abs % denominator;
       rounded_mag = quotient_mag;

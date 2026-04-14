@@ -315,10 +315,10 @@ Exit criteria:
 | 6.1 | `rtl/compute/embedding_lookup.sv` | RTL | Token ID to FP16 embedding-row fetch control | packages, embedding DMA | row fetch stub | compile smoke with fake embedding rows |
 | 6.2 | `rtl/compute/embedding_quantizer.sv` | RTL | FP16 embedding row to INT8 activation tile | packages, scale store | first pass can emit clipped deterministic pattern | compile smoke |
 | 6.3 | `rtl/compute/residual_add.sv` | RTL | Elementwise residual accumulation | packages | real leaf arithmetic | integrate with requantize TB or local smoke |
-| 6.4 | `rtl/compute/elementwise_mul.sv` | RTL | SwiGLU multiply | packages | real leaf arithmetic | compile smoke |
-| 6.5 | `rtl/compute/lm_head_controller.sv` | RTL | Vocabulary-tile scheduling for LM head | packages, scheduler, scale store | tile-descriptor issue stub | compile with argmax smoke |
+| 6.4 | `rtl/compute/elementwise_mul.sv` | RTL | SwiGLU multiply | packages | real leaf arithmetic | `rtl/tb/tb_elementwise_mul.sv` |
+| 6.5 | `rtl/compute/lm_head_controller.sv` | RTL | Vocabulary-tile scheduling for LM head | packages, scheduler, scale store | concrete outer vocab-tile controller | `rtl/tb/tb_lm_head_controller.sv` |
 | 6.6 | `rtl/compute/argmax_reduction.sv` | RTL | Greedy argmax across vocab tiles | packages | real hierarchical reduction leaf | `rtl/tb/tb_argmax_reduction.sv` |
-| 6.7 | `rtl/compute/debug_capture_mux.sv` | RTL | Selectable internal debug source mux | packages | source-select stub | compile smoke |
+| 6.7 | `rtl/compute/debug_capture_mux.sv` | RTL | Selectable internal debug source mux | packages | non-backpressuring source-select mux with drop reporting | `rtl/tb/tb_debug_capture_mux.sv` |
 
 ## Phase 7 - Decoder-Layer Integration
 

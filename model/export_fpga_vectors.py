@@ -32,14 +32,20 @@ import tinyllama_gemm_int8 as bridge
 PHASE3 = "phase3"
 PHASE4 = "phase4"
 PHASE5 = "phase5"
+PHASE6 = "phase6"
 
 M_TILE = 16
 N_TILE = 32
 GEMM_LANES = 512
+ACC_VECTOR_ELEMS = GEMM_LANES
 SCALE_VECTOR_ELEMS = 16
+DMA_BEAT_BYTES = 32
+DMA_BEAT_W = DMA_BEAT_BYTES * 8
 Q16_16_FRAC_BITS = 16
 K_TILE = 64
 D_MODEL = 2048
+VOCAB_SIZE = 32000
+VOCAB_TILE = 128
 HEAD_DIM = 64
 ROPE_CHUNK_TOKENS = 8
 ROPE_HALF_DIM = HEAD_DIM // 2
@@ -92,6 +98,33 @@ def q16_16_signed_from_float(value: float) -> np.int32:
     scaled = int(round(float(value) * float(1 << Q16_16_FRAC_BITS)))
     scaled = max(-(1 << 31), min(scaled, (1 << 31) - 1))
     return np.int32(scaled)
+
+
+def q16_16_signed_from_fp16_bits(fp16_bits: int | np.integer) -> np.int32:
+    raw = int(fp16_bits) & 0xFFFF
+    sign_bit = (raw >> 15) & 0x1
+    exp_bits = (raw >> 10) & 0x1F
+    frac_bits = raw & 0x3FF
+
+    if exp_bits == 0 and frac_bits == 0:
+        return np.int32(0)
+
+    if exp_bits == 0:
+        abs_val = (frac_bits + 128) >> 8
+    elif exp_bits == 0x1F:
+        return np.int32(-0x80000000 if sign_bit else 0x7FFFFFFF)
+    else:
+        mantissa = (1 << 10) | frac_bits
+        shift_amt = exp_bits - 9
+        if shift_amt >= 0:
+            abs_val = mantissa << shift_amt
+        else:
+            round_bias = 1 << ((-shift_amt) - 1)
+            abs_val = (mantissa + round_bias) >> (-shift_amt)
+
+    signed_val = -abs_val if sign_bit else abs_val
+    signed_val = max(-(1 << 31), min(signed_val, (1 << 31) - 1))
+    return np.int32(signed_val)
 
 
 def float_from_q16_16(raw_q16: int | np.integer) -> np.float32:
@@ -762,6 +795,12 @@ def pack_one_tile_int8(tile_1d: np.ndarray, elem_count: int) -> np.ndarray:
     return packed
 
 
+def pack_one_tile_i32(tile_1d: np.ndarray, elem_count: int) -> np.ndarray:
+    packed = np.zeros((ACC_VECTOR_ELEMS,), dtype=np.int32)
+    packed[:elem_count] = np.asarray(tile_1d[:elem_count], dtype=np.int32)
+    return packed
+
+
 def replicate_scale_vec(scale_fp: float) -> np.ndarray:
     scale_q16 = q16_16_from_float(scale_fp)
     return np.full((SCALE_VECTOR_ELEMS,), scale_q16, dtype=np.uint32)
@@ -809,7 +848,7 @@ def quantize_fixed_tile_by_scale_q16(
     flat_in = np.asarray(values_q16, dtype=np.int64).reshape(-1)
     flat_out = out.reshape(-1)
     for idx, raw_value in enumerate(flat_in):
-      abs_num = abs(int(raw_value)) << Q16_16_FRAC_BITS
+      abs_num = abs(int(raw_value))
       quotient = abs_num // denominator
       remainder = abs_num % denominator
       rounded = quotient
@@ -1277,8 +1316,329 @@ def collect_phase5_nonlinear_tensors(
     )
     return {
         "layer_input_fp": np.asarray(layer_input, dtype=np.float32),
+        "x_after_attn_fp": np.asarray(debug["x_after_attn_fp"], dtype=np.float32),
+        "layer_out_fp": np.asarray(debug["layer_out_fp"], dtype=np.float32),
         "gate_proj_fp": np.asarray(debug["ffn"]["gate_proj_fp"], dtype=np.float32),
+        "up_proj_fp": np.asarray(debug["ffn"]["up_proj_fp"], dtype=np.float32),
     }
+
+
+def build_embedding_lookup_case(
+    *,
+    runtime_mode: str,
+    token_id: int,
+    token_count: int,
+    token_base: int,
+    is_last: bool,
+    embedding_row_fp: np.ndarray,
+    output_root: Path,
+    manifest_entries: list[dict[str, Any]],
+) -> None:
+    row_fp = np.asarray(embedding_row_fp, dtype=np.float16).astype(np.float32)
+    row_fp16 = np.asarray(row_fp, dtype=np.float16).view(np.uint16)
+    row_beats = row_fp16.reshape(-1, DMA_BEAT_W // 16)
+
+    case_id = f"{PHASE6}_{runtime_mode}_embedding_lookup_row0"
+    case_path = output_root / PHASE6 / f"{case_id}.npz"
+    ensure_dir(case_path.parent)
+
+    np.savez(
+        case_path,
+        token_id=np.asarray([token_id], dtype=np.uint32),
+        token_count=np.asarray([token_count], dtype=np.uint32),
+        token_base=np.asarray([token_base], dtype=np.uint32),
+        row_fp=row_fp,
+        row_fp16=row_fp16,
+    )
+
+    rtl_root = output_root / PHASE6 / "rtl"
+    fixture_base = rtl_root / case_id
+    write_hex_memh(
+        fixture_base.with_suffix(".meta.memh"),
+        np.asarray([token_id, token_count, token_base, int(is_last)], dtype=np.uint32),
+        bits=32,
+        signed=False,
+    )
+    write_packed_lane_memh(
+        fixture_base.with_suffix(".row_beats_packed.memh"),
+        row_beats,
+        bits_per_lane=16,
+        signed=False,
+    )
+
+    manifest_entries.append(
+        {
+            "case_id": case_id,
+            "phase": PHASE6,
+            "block": "embedding_lookup",
+            "path": str(case_path.as_posix()),
+            "runtime_mode": runtime_mode,
+            "token_id": token_id,
+            "token_base": token_base,
+            "rtl_fixture_base": str(fixture_base.as_posix()),
+        }
+    )
+
+
+def build_embedding_quantizer_case(
+    *,
+    runtime_mode: str,
+    token_base: int,
+    rows_fp: np.ndarray,
+    output_root: Path,
+    manifest_entries: list[dict[str, Any]],
+) -> None:
+    rows_fp = np.asarray(rows_fp, dtype=np.float16).astype(np.float32)
+    row_count = rows_fp.shape[0]
+    rows_fp16 = np.asarray(rows_fp, dtype=np.float16).view(np.uint16)
+    _, scale_fp = bridge.quantize_int8(rows_fp)
+    scale_q16 = q16_16_from_float(scale_fp)
+    rows_q16 = np.vectorize(q16_16_signed_from_fp16_bits, otypes=[np.int32])(rows_fp16)
+    rows_q = quantize_fixed_tile_by_scale_q16(rows_q16, scale_q16, nonnegative_only=False)
+    scale_vec = np.full((SCALE_VECTOR_ELEMS,), scale_q16, dtype=np.uint32)
+    rows_fp16_padded = np.zeros((M_TILE, D_MODEL), dtype=np.uint16)
+    rows_fp16_padded[:row_count, :] = rows_fp16
+
+    feature_tile_count = D_MODEL // N_TILE
+    act_tiles = np.zeros((feature_tile_count, GEMM_LANES), dtype=np.int8)
+    for tile_idx in range(feature_tile_count):
+        tile_slice = rows_q[:, tile_idx * N_TILE:(tile_idx + 1) * N_TILE]
+        act_tiles[tile_idx] = pack_one_tile_int8(tile_slice.reshape(-1), row_count * N_TILE)
+
+    case_id = f"{PHASE6}_{runtime_mode}_embedding_quantizer_batch0"
+    case_path = output_root / PHASE6 / f"{case_id}.npz"
+    ensure_dir(case_path.parent)
+
+    np.savez(
+        case_path,
+        rows_fp=rows_fp,
+        rows_q=rows_q,
+        scale=np.asarray([scale_fp], dtype=np.float32),
+        act_tiles=act_tiles,
+    )
+
+    rtl_root = output_root / PHASE6 / "rtl"
+    fixture_base = rtl_root / case_id
+    write_hex_memh(
+        fixture_base.with_suffix(".meta.memh"),
+        np.asarray([row_count, token_base], dtype=np.uint32),
+        bits=32,
+        signed=False,
+    )
+    write_packed_lane_memh(
+        fixture_base.with_suffix(".rows_fp16_packed.memh"),
+        rows_fp16_padded,
+        bits_per_lane=16,
+        signed=False,
+    )
+    write_packed_lane_memh(
+        fixture_base.with_suffix(".scale_packed.memh"),
+        scale_vec,
+        bits_per_lane=32,
+        signed=False,
+    )
+    write_packed_lane_memh(
+        fixture_base.with_suffix(".act_tiles_expected_packed.memh"),
+        act_tiles,
+        bits_per_lane=8,
+        signed=True,
+    )
+
+    manifest_entries.append(
+        {
+            "case_id": case_id,
+            "phase": PHASE6,
+            "block": "embedding_quantizer",
+            "path": str(case_path.as_posix()),
+            "runtime_mode": runtime_mode,
+            "row_count": row_count,
+            "token_base": token_base,
+            "rtl_fixture_base": str(fixture_base.as_posix()),
+        }
+    )
+
+
+def build_residual_add_case(
+    *,
+    runtime_mode: str,
+    layer_id: int,
+    block_name: str,
+    block_id: int,
+    residual_fp_full: np.ndarray,
+    update_fp_full: np.ndarray,
+    row_slice: slice,
+    output_root: Path,
+    manifest_entries: list[dict[str, Any]],
+) -> None:
+    residual_tile = np.asarray(residual_fp_full[row_slice, :N_TILE], dtype=np.float32)
+    update_tile = np.asarray(update_fp_full[row_slice, :N_TILE], dtype=np.float32)
+    row_count = residual_tile.shape[0]
+    elem_count = row_count * N_TILE
+
+    residual_q16 = np.vectorize(q16_16_signed_from_float, otypes=[np.int32])(residual_tile.reshape(-1))
+    update_q16 = np.vectorize(q16_16_signed_from_float, otypes=[np.int32])(update_tile.reshape(-1))
+    sum_q16 = (residual_q16.astype(np.int64) + update_q16.astype(np.int64)).astype(np.int32)
+
+    residual_lane = pack_one_tile_i32(residual_q16, elem_count)
+    update_lane = pack_one_tile_i32(update_q16, elem_count)
+    sum_lane = pack_one_tile_i32(sum_q16, elem_count)
+
+    case_id = f"{PHASE6}_{runtime_mode}_layer{layer_id}_{block_name}_m0"
+    case_path = output_root / PHASE6 / f"{case_id}.npz"
+    ensure_dir(case_path.parent)
+
+    np.savez(
+        case_path,
+        residual_fp=residual_tile,
+        update_fp=update_tile,
+        sum_fp=np.asarray(residual_tile + update_tile, dtype=np.float32),
+        residual_q16=residual_lane,
+        update_q16=update_lane,
+        sum_q16=sum_lane,
+    )
+
+    rtl_root = output_root / PHASE6 / "rtl"
+    fixture_base = rtl_root / case_id
+    write_hex_memh(
+        fixture_base.with_suffix(".meta.memh"),
+        np.asarray([block_id, elem_count], dtype=np.uint32),
+        bits=32,
+        signed=False,
+    )
+    write_packed_lane_memh(fixture_base.with_suffix(".residual_in_packed.memh"), residual_lane, bits_per_lane=32, signed=True)
+    write_packed_lane_memh(fixture_base.with_suffix(".update_in_packed.memh"), update_lane, bits_per_lane=32, signed=True)
+    write_packed_lane_memh(fixture_base.with_suffix(".sum_expected_packed.memh"), sum_lane, bits_per_lane=32, signed=True)
+
+    manifest_entries.append(
+        {
+            "case_id": case_id,
+            "phase": PHASE6,
+            "block": "residual_add",
+            "path": str(case_path.as_posix()),
+            "runtime_mode": runtime_mode,
+            "layer_id": layer_id,
+            "block_id": block_id,
+            "elem_count": elem_count,
+            "rtl_fixture_base": str(fixture_base.as_posix()),
+        }
+    )
+
+
+def build_elementwise_mul_case(
+    *,
+    runtime_mode: str,
+    layer_id: int,
+    silu_fp_full: np.ndarray,
+    up_fp_full: np.ndarray,
+    row_slice: slice,
+    output_root: Path,
+    manifest_entries: list[dict[str, Any]],
+) -> None:
+    silu_q_full, silu_scale = bridge.quantize_int8(silu_fp_full)
+    up_q_full, up_scale = bridge.quantize_int8(up_fp_full)
+
+    silu_q_tile = np.asarray(silu_q_full[row_slice, :N_TILE], dtype=np.int8)
+    up_q_tile = np.asarray(up_q_full[row_slice, :N_TILE], dtype=np.int8)
+    row_count = silu_q_tile.shape[0]
+    elem_count = row_count * N_TILE
+    prod_tile = silu_q_tile.astype(np.int32) * up_q_tile.astype(np.int32)
+
+    silu_lane = pack_one_tile_int8(silu_q_tile.reshape(-1), elem_count)
+    up_lane = pack_one_tile_int8(up_q_tile.reshape(-1), elem_count)
+    prod_lane = pack_one_tile_i32(prod_tile.reshape(-1), elem_count)
+
+    case_id = f"{PHASE6}_{runtime_mode}_layer{layer_id}_glu_mul_m0"
+    case_path = output_root / PHASE6 / f"{case_id}.npz"
+    ensure_dir(case_path.parent)
+
+    np.savez(
+        case_path,
+        silu_q=silu_q_tile,
+        up_q=up_q_tile,
+        prod_int32=prod_tile,
+        silu_scale=np.asarray([silu_scale], dtype=np.float32),
+        up_scale=np.asarray([up_scale], dtype=np.float32),
+    )
+
+    rtl_root = output_root / PHASE6 / "rtl"
+    fixture_base = rtl_root / case_id
+    write_hex_memh(
+        fixture_base.with_suffix(".meta.memh"),
+        np.asarray([0, elem_count], dtype=np.uint32),
+        bits=32,
+        signed=False,
+    )
+    write_packed_lane_memh(fixture_base.with_suffix(".silu_in_packed.memh"), silu_lane, bits_per_lane=8, signed=True)
+    write_packed_lane_memh(fixture_base.with_suffix(".up_in_packed.memh"), up_lane, bits_per_lane=8, signed=True)
+    write_packed_lane_memh(fixture_base.with_suffix(".prod_out_expected_packed.memh"), prod_lane, bits_per_lane=32, signed=True)
+
+    manifest_entries.append(
+        {
+            "case_id": case_id,
+            "phase": PHASE6,
+            "block": "elementwise_mul",
+            "path": str(case_path.as_posix()),
+            "runtime_mode": runtime_mode,
+            "layer_id": layer_id,
+            "row_count": row_count,
+            "elem_count": elem_count,
+            "rtl_fixture_base": str(fixture_base.as_posix()),
+        }
+    )
+
+
+def build_argmax_case(
+    *,
+    runtime_mode: str,
+    logits_fp: np.ndarray,
+    output_root: Path,
+    manifest_entries: list[dict[str, Any]],
+) -> None:
+    logits_q16 = np.vectorize(q16_16_signed_from_float, otypes=[np.int32])(np.asarray(logits_fp, dtype=np.float32))
+    tile_count = ceil_div(VOCAB_SIZE, VOCAB_TILE)
+    logits_tiles = np.zeros((tile_count, ACC_VECTOR_ELEMS), dtype=np.int32)
+    for tile_idx in range(tile_count):
+        start = tile_idx * VOCAB_TILE
+        stop = min(start + VOCAB_TILE, VOCAB_SIZE)
+        logits_tiles[tile_idx] = pack_one_tile_i32(logits_q16[start:stop], stop - start)
+
+    expected_token = int(np.argmax(logits_q16))
+    expected_logit = int(logits_q16[expected_token])
+
+    case_id = f"{PHASE6}_{runtime_mode}_argmax"
+    case_path = output_root / PHASE6 / f"{case_id}.npz"
+    ensure_dir(case_path.parent)
+
+    np.savez(
+        case_path,
+        logits_fp=np.asarray(logits_fp, dtype=np.float32),
+        logits_q16=logits_q16,
+        argmax_expected=np.asarray([expected_token], dtype=np.uint32),
+        logit_expected=np.asarray([expected_logit], dtype=np.int32),
+    )
+
+    rtl_root = output_root / PHASE6 / "rtl"
+    fixture_base = rtl_root / case_id
+    write_hex_memh(
+        fixture_base.with_suffix(".meta.memh"),
+        np.asarray([tile_count, expected_token, expected_logit, VOCAB_TILE], dtype=np.int32),
+        bits=32,
+        signed=True,
+    )
+    write_packed_lane_memh(fixture_base.with_suffix(".logits_tiles_packed.memh"), logits_tiles, bits_per_lane=32, signed=True)
+
+    manifest_entries.append(
+        {
+            "case_id": case_id,
+            "phase": PHASE6,
+            "block": "argmax",
+            "path": str(case_path.as_posix()),
+            "runtime_mode": runtime_mode,
+            "tile_count": tile_count,
+            "argmax_expected": expected_token,
+            "rtl_fixture_base": str(fixture_base.as_posix()),
+        }
+    )
 
 
 def build_rmsnorm_case(
@@ -1718,6 +2078,151 @@ def export_phase5_cases(
     return manifest_path
 
 
+def export_phase6_cases(
+    *,
+    weights_path: str,
+    layer: int,
+    prefill_token_ids: list[int],
+    decode_context_token_ids: list[int],
+    output_dir: str,
+    source_root: Path,
+) -> Path:
+    output_root = Path(output_dir)
+    ensure_dir(output_root / PHASE6)
+
+    weights = ref.load_weights(weights_path, compute_dtype=np.float32, cache_arrays=False)
+    if layer < 0 or layer >= weights.cfg["num_hidden_layers"]:
+        raise ValueError(
+            f"--layer must be in [0, {weights.cfg['num_hidden_layers'] - 1}]"
+        )
+
+    manifest_entries: list[dict[str, Any]] = []
+
+    prefill_nonlinear = collect_phase5_nonlinear_tensors(
+        token_ids=prefill_token_ids,
+        target_layer=layer,
+        weights=weights,
+    )
+    decode_nonlinear = collect_phase5_nonlinear_tensors(
+        token_ids=decode_context_token_ids,
+        target_layer=layer,
+        weights=weights,
+    )
+
+    build_elementwise_mul_case(
+        runtime_mode="prefill",
+        layer_id=layer,
+        silu_fp_full=ref.silu(np.asarray(prefill_nonlinear["gate_proj_fp"], dtype=np.float32)),
+        up_fp_full=np.asarray(prefill_nonlinear["up_proj_fp"], dtype=np.float32),
+        row_slice=slice(0, M_TILE),
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+    build_elementwise_mul_case(
+        runtime_mode="decode",
+        layer_id=layer,
+        silu_fp_full=ref.silu(np.asarray(decode_nonlinear["gate_proj_fp"], dtype=np.float32)),
+        up_fp_full=np.asarray(decode_nonlinear["up_proj_fp"], dtype=np.float32),
+        row_slice=slice(-1, None),
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+
+    build_embedding_lookup_case(
+        runtime_mode="prefill",
+        token_id=int(prefill_token_ids[0]),
+        token_count=1,
+        token_base=0,
+        is_last=(len(prefill_token_ids) == 1),
+        embedding_row_fp=np.asarray(weights.embed([prefill_token_ids[0]])[0], dtype=np.float32),
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+    build_embedding_lookup_case(
+        runtime_mode="decode",
+        token_id=int(decode_context_token_ids[-1]),
+        token_count=len(decode_context_token_ids),
+        token_base=len(decode_context_token_ids) - 1,
+        is_last=True,
+        embedding_row_fp=np.asarray(weights.embed([decode_context_token_ids[-1]])[0], dtype=np.float32),
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+
+    build_embedding_quantizer_case(
+        runtime_mode="prefill",
+        token_base=0,
+        rows_fp=np.asarray(weights.embed(prefill_token_ids[:M_TILE]), dtype=np.float32),
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+    build_embedding_quantizer_case(
+        runtime_mode="decode",
+        token_base=len(decode_context_token_ids) - 1,
+        rows_fp=np.asarray(weights.embed([decode_context_token_ids[-1]]), dtype=np.float32),
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+
+    build_residual_add_case(
+        runtime_mode="prefill",
+        layer_id=layer,
+        block_name="residual1",
+        block_id=13,
+        residual_fp_full=np.asarray(prefill_nonlinear["layer_input_fp"], dtype=np.float32),
+        update_fp_full=np.asarray(prefill_nonlinear["x_after_attn_fp"] - prefill_nonlinear["layer_input_fp"], dtype=np.float32),
+        row_slice=slice(0, M_TILE),
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+    build_residual_add_case(
+        runtime_mode="decode",
+        layer_id=layer,
+        block_name="residual2",
+        block_id=21,
+        residual_fp_full=np.asarray(decode_nonlinear["x_after_attn_fp"], dtype=np.float32),
+        update_fp_full=np.asarray(decode_nonlinear["layer_out_fp"] - decode_nonlinear["x_after_attn_fp"], dtype=np.float32),
+        row_slice=slice(-1, None),
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+
+    for runtime_mode, token_ids in (
+        ("prefill", prefill_token_ids),
+        ("decode", decode_context_token_ids),
+    ):
+        cos_local, sin_local = ref.build_rope_cache(
+            seq_len=len(token_ids),
+            head_dim=weights.cfg["head_dim"],
+            rope_theta=weights.cfg["rope_theta"],
+        )
+        logits = ref.forward(token_ids, weights, cos_local, sin_local)[-1]
+        build_argmax_case(
+            runtime_mode=runtime_mode,
+            logits_fp=np.asarray(logits, dtype=np.float32),
+            output_root=output_root,
+            manifest_entries=manifest_entries,
+        )
+
+    manifest = {
+        "trace_format_version": 1,
+        "phase": PHASE6,
+        "model_id": weights.cfg["model_id"],
+        "weights_path": weights_path,
+        "layer": layer,
+        "prefill_token_ids": prefill_token_ids,
+        "decode_context_token_ids": decode_context_token_ids,
+        "source_root": str(source_root.as_posix()),
+        "cases": manifest_entries,
+    }
+
+    manifest_path = output_root / "manifest.json"
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+        handle.write("\n")
+    return manifest_path
+
+
 def export_phase3_for_tokens(
     *,
     runtime_mode: str,
@@ -1844,7 +2349,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--phase",
-        choices=[PHASE3, PHASE4, PHASE5],
+        choices=[PHASE3, PHASE4, PHASE5, PHASE6],
         default=PHASE3,
         help="Trace-export phase.",
     )
@@ -1878,7 +2383,7 @@ def main() -> None:
 
     prefill_token_ids = parse_token_ids(args.prefill_token_ids)
     decode_token_ids_arg = args.decode_token_ids
-    if (args.phase in (PHASE4, PHASE5)) and (decode_token_ids_arg == DEFAULT_DECODE_TOKEN_IDS):
+    if (args.phase in (PHASE4, PHASE5, PHASE6)) and (decode_token_ids_arg == DEFAULT_DECODE_TOKEN_IDS):
         decode_token_ids_arg = DEFAULT_PHASE4_DECODE_CONTEXT_TOKEN_IDS
     decode_token_ids = parse_token_ids(decode_token_ids_arg)
 
@@ -1899,8 +2404,17 @@ def main() -> None:
             output_dir=args.output_dir,
             source_root=Path(__file__).resolve().parent.parent,
         )
-    else:
+    elif args.phase == PHASE5:
         manifest_path = export_phase5_cases(
+            weights_path=args.weights,
+            layer=args.layer,
+            prefill_token_ids=prefill_token_ids,
+            decode_context_token_ids=decode_token_ids,
+            output_dir=args.output_dir,
+            source_root=Path(__file__).resolve().parent.parent,
+        )
+    else:
+        manifest_path = export_phase6_cases(
             weights_path=args.weights,
             layer=args.layer,
             prefill_token_ids=prefill_token_ids,

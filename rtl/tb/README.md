@@ -34,6 +34,13 @@ This folder contains production TinyLlama RTL smoke tests for the new `rtl/commo
 | `tb_rmsnorm_wrapper.sv` | Exported Phase 5 trace-backed smoke test for the RTL wrapper around the fixed-point RMSNorm HLS core, including gamma-beat capture, scale emission, and quantized output verification. | Run the `tb_rmsnorm_wrapper` command below. |
 | `tb_softmax_wrapper.sv` | Exported Phase 5 trace-backed smoke test for the RTL wrapper around the fixed-point softmax HLS core, including masked-score dequantization, probability-scale emission, and INT8 probability output verification. | Run the `tb_softmax_wrapper` command below. |
 | `tb_silu_wrapper.sv` | Exported Phase 5 trace-backed smoke test for the RTL wrapper around the fixed-point SiLU HLS core, including input dequantization, output requantization, and scale emission. | Run the `tb_silu_wrapper` command below. |
+| `tb_embedding_lookup.sv` | Directed plus exported Phase 6 trace-backed smoke test for embedding-row DMA request generation and full-row FP16 assembly. | Run the `tb_embedding_lookup` command below. |
+| `tb_embedding_quantizer.sv` | Directed plus exported Phase 6 trace-backed smoke test for FP16 embedding-row batching, Q16.16 scale-based quantization, scale emission, and INT8 activation-tile output. | Run the `tb_embedding_quantizer` command below. |
+| `tb_residual_add.sv` | Directed plus exported Phase 6 trace-backed smoke test for aligned residual1/residual2 INT32 accumulation and tag retiming. | Run the `tb_residual_add` command below. |
+| `tb_elementwise_mul.sv` | Directed plus exported Phase 6 trace-backed smoke test for the SwiGLU `SiLU(gate) * up` multiply leaf. | Run the `tb_elementwise_mul` command below. |
+| `tb_lm_head_controller.sv` | Directed controller smoke test for the outer LM-head vocab-tile loop and partial-logit retagging path. | Run the `tb_lm_head_controller` command below. |
+| `tb_argmax_reduction.sv` | Directed plus exported Phase 6 trace-backed smoke test for full-vocabulary greedy argmax with tie-break verification. | Run the `tb_argmax_reduction` command below. |
+| `tb_debug_capture_mux.sv` | Directed smoke test for layer/block filtering, lowest-index source priority, and drop-pulse behavior in the debug mux. | Run the `tb_debug_capture_mux` command below. |
 
 ## Smoke Tests
 
@@ -560,4 +567,163 @@ Expected pass string:
 
 ```text
 PASS: tb_silu_wrapper
+```
+
+### `tb_embedding_lookup.sv`
+
+Before running this bench, regenerate the Phase 6 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase6 --layer 0 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_embedding_lookup.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/embedding_lookup.sv `
+  rtl/tb/tb_embedding_lookup.sv
+vvp sim/tb_embedding_lookup.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_embedding_lookup
+```
+
+### `tb_embedding_quantizer.sv`
+
+Before running this bench, regenerate the Phase 6 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase6 --layer 0 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_embedding_quantizer.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/embedding_quantizer.sv `
+  rtl/tb/tb_embedding_quantizer.sv
+vvp sim/tb_embedding_quantizer.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_embedding_quantizer
+```
+
+### `tb_residual_add.sv`
+
+Before running this bench, regenerate the Phase 6 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase6 --layer 0 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_residual_add.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/residual_add.sv `
+  rtl/tb/tb_residual_add.sv
+vvp sim/tb_residual_add.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_residual_add
+```
+
+### `tb_elementwise_mul.sv`
+
+Before running this bench, regenerate the Phase 6 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase6 --layer 0 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_elementwise_mul.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/elementwise_mul.sv `
+  rtl/tb/tb_elementwise_mul.sv
+vvp sim/tb_elementwise_mul.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_elementwise_mul
+```
+
+### `tb_lm_head_controller.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_lm_head_controller.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/lm_head_controller.sv `
+  rtl/tb/tb_lm_head_controller.sv
+vvp sim/tb_lm_head_controller.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_lm_head_controller
+```
+
+### `tb_argmax_reduction.sv`
+
+Before running this bench, regenerate the Phase 6 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase6 --layer 0 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_argmax_reduction.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/argmax_reduction.sv `
+  rtl/tb/tb_argmax_reduction.sv
+vvp sim/tb_argmax_reduction.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_argmax_reduction
+```
+
+### `tb_debug_capture_mux.sv`
+
+```powershell
+iverilog -g2012 -o sim/tb_debug_capture_mux.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/debug_capture_mux.sv `
+  rtl/tb/tb_debug_capture_mux.sv
+vvp sim/tb_debug_capture_mux.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_debug_capture_mux
 ```

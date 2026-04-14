@@ -550,6 +550,12 @@ hardware implementation.
   - embedding rows from `embedding_lmhead_dma_reader.sv`
 - Outputs / buses:
   - raw embedding activation rows to `embedding_quantizer.sv`
+- Concrete contract:
+  - one token launch issues one `TENSOR_EMBED` DMA request
+  - request address is `embedding_base + token_id * (D_MODEL * 2)`
+  - request byte count is one full FP16 row: `2048 * 2 = 4096` bytes
+  - one row is assembled from `4096 / 32 = 128` `256-bit` beats
+  - output metadata preserves the incoming token metadata for the assembled row
 - Parallelism:
   - row burst fetch for a `SEQ_TILE=64` prefill tile
   - single-row fetch in decode mode.
@@ -565,6 +571,25 @@ hardware implementation.
   - embedding scale metadata
 - Outputs / buses:
   - `act_bus` to activation buffers
+- Concrete contract:
+  - consumes fully assembled FP16 embedding rows from `embedding_lookup.sv`
+  - batches up to `M_TILE = 16` rows before emission
+  - one batch emits:
+    - one scale vector tagged for `BLOCK_EMBED`
+    - `D_MODEL / N_TILE = 64` activation tiles
+  - lane packing is row-major over the current embedding batch:
+    `lane = row_local * N_TILE + col_local`
+  - scale entry selection is `row_local = lane / N_TILE`, so each 32-lane row
+    slice in the `16 x 32` batch tile consumes one scale-vector entry
+  - `tile_id` is the feature-tile index `0..63`
+  - `token_base` is the first token position in the emitted batch
+  - `seq_count` is the number of rows in the emitted batch
+  - `elem_count` is `row_count * N_TILE`
+  - FP16 rows are converted to Q16.16 and then quantized to INT8 by dividing by
+    the unsigned Q16.16 scale payload with round-to-nearest-even and clamp
+  - the embedding FP16-to-Q16.16 unpack path uses round-half-up on right shifts;
+    compared with the banker's-rounding path used for RMSNorm gamma unpack, the
+    difference is at most 1 LSB when discarded bits are present
 - Parallelism:
   - elementwise vector quantization across one activation tile.
 
@@ -748,11 +773,19 @@ hardware implementation.
 - Physical instances: 1 reused block
 - Purpose: Adds the residual stream after attention and after FFN.
 - Inputs / buses:
-  - residual INT32 or INT8 stream
-  - update INT32 or INT8 stream
-  - mode tag
+  - aligned residual `acc_bus`
+  - aligned update `acc_bus`
+  - selected residual block ID (`BLOCK_RESIDUAL1` or `BLOCK_RESIDUAL2`)
 - Outputs / buses:
-  - summed stream to `requantize_unit.sv` or next block
+  - aligned summed `acc_bus` to `requantize_unit.sv` or the next INT32 stage
+- Concrete contract:
+  - both input tags must match for layer, tile, token base, sequence count,
+    head IDs, element count, and tail markers
+  - output tag preserves the residual metadata but overrides:
+    - `block_id = block_id_i`
+    - `gemm_mode = GEMM_NONE`
+  - active lanes are summed lane-wise in INT32 with no explicit saturation
+  - inactive tail lanes are zero-filled
 - Parallelism:
   - vector-lane elementwise add across the active tile.
 
@@ -802,6 +835,19 @@ hardware implementation.
 - Outputs / buses:
   - GEMM schedule to `gemm_op_scheduler.sv`
   - partial-logit streams to `argmax_reduction.sv`
+- Concrete contract:
+  - `gemm_op_scheduler.sv` handles exactly one `VOCAB_TILE = 128` LM-head pass
+    per `lm_head_only` launch
+  - `lm_head_controller.sv` owns the outer vocabulary loop and issues
+    `VOCAB_SIZE / VOCAB_TILE = 250` scheduler launches per token
+  - the captured final hidden-state tile and its scale metadata remain stable
+    for the full 250-tile sweep
+  - forwarded partial logits are retagged with:
+    - `block_id = BLOCK_LM_HEAD`
+    - `gemm_mode = GEMM_LM_HEAD`
+    - `tile_id = vocab_tile_idx`
+    - `elem_count = 128`
+    - `is_last = 1` only on the final vocab tile
 - Parallelism:
   - tiled processing across vocab tiles
   - overlaps weight fetch with logit reduction when possible.
@@ -818,6 +864,13 @@ hardware implementation.
   - winning token ID
   - winning logit value
   - end-of-vocab reduction done
+- Concrete contract:
+  - reduction is performed across the full fixed-vocabulary sweep emitted by
+    `lm_head_controller.sv`
+  - `tile_id` selects the outer `VOCAB_TILE = 128` slice and lane `0..127`
+    selects token offsets inside that slice
+  - `elem_count` is clamped to `VOCAB_TILE`
+  - if two logits are exactly equal, the lower token id wins the tie-break
 - Parallelism:
   - parallel compare-reduce within each vocab tile
   - hierarchical reduction across tiles.
@@ -833,6 +886,14 @@ hardware implementation.
   - debug configuration from `kernel_reg_file.sv`
 - Outputs / buses:
   - `dbg_bus` to `debug_dma_writer.sv`
+- Concrete contract:
+  - candidate sources present one-cycle capture pulses and are never
+    backpressured by the mux
+  - `debug_layer_sel` filters `tag.layer_id`
+  - `debug_step_sel` encodes the requested `block_id_e`
+  - if multiple sources match in the same cycle, the lowest source index wins
+  - if a source matches while the downstream debug writer is not ready, the
+    capture is dropped and an overflow pulse is emitted
 - Parallelism:
   - no arithmetic parallelism; selection/multiplexing only.
 

@@ -106,6 +106,10 @@ Project/
       rope_unit.sv
       gqa_router.sv
       causal_mask_unit.sv
+      elementwise_mul.sv
+      lm_head_controller.sv
+      argmax_reduction.sv
+      debug_capture_mux.sv
     nonlinear/
       rmsnorm_wrapper.sv
       softmax_wrapper.sv
@@ -140,6 +144,10 @@ Project/
       tb_rmsnorm_wrapper.sv
       tb_softmax_wrapper.sv
       tb_silu_wrapper.sv
+      tb_elementwise_mul.sv
+      tb_lm_head_controller.sv
+      tb_argmax_reduction.sv
+      tb_debug_capture_mux.sv
     control_fsm.sv
     top.sv
     mac_unit.sv
@@ -218,12 +226,22 @@ Project/
   - verified RTL wrappers that consume exported Phase 5 trace fixtures
 - `model/export_fpga_vectors.py` now provides the canonical golden-trace export entry point for both:
   - Phase 3 arithmetic verification
-  - Phase 4 RoPE and causal-mask verification
+  - Phase 4 attention-path verification
   - Phase 5 nonlinear verification
-  It writes canonical traces under `sim/golden_traces/`, emits packed `.memh` fixtures for the RTL benches, and regenerates the tracked RoPE ROM memh files under `rtl/compute/`.
+  - full Phase 6 embedding/FFN/LM-head trace-backed verification
+- `rtl/compute/` now also contains the complete verified Phase 6 set:
+  - `embedding_lookup.sv`
+  - `embedding_quantizer.sv`
+  - `residual_add.sv`
+  - `elementwise_mul.sv`
+  - `lm_head_controller.sv`
+  - `argmax_reduction.sv`
+  - `debug_capture_mux.sv`
+  - local smoke tests for all seven
+- `model/export_fpga_vectors.py` writes canonical traces under `sim/golden_traces/`, emits packed `.memh` fixtures for the RTL benches, and regenerates the tracked RoPE ROM memh files under `rtl/compute/`.
 - `docs/` now describe the full TinyLlama prefill/decode accelerator that the project is building toward.
 
-The repo now contains hardened production modules through Phase 5, but full decoder-layer and top-level runtime integration are still in progress. The finalized architectural contract continues to live under `docs/`.
+The repo now contains hardened production modules through Phase 6. The next milestone is Phase 7 decoder-layer integration, where the already-verified blocks are wired into one full reused decoder-layer pass before top-level runtime integration begins.
 
 One practical note: the production RTL we are writing is intended to be
 synthesizable, but a passing Icarus smoke test is only the first gate. The

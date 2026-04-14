@@ -130,6 +130,9 @@ A9. Mixed-precision / quantization split
     - softmax
     - final RMSNorm
   Residual accumulation remains INT32 before requantization.
+  Residual add is an unsaturated INT32 lane-wise sum. There is no explicit
+  saturation clamp in the residual block; this matches the current INT32
+  datapath contract and the expected operating range.
 
 A10. Quantization scale policy
   Quantization is symmetric INT8 with zero_point = 0 everywhere.
@@ -138,6 +141,11 @@ A10. Quantization scale policy
   RTL-visible scale payload format: unsigned Q16.16 multipliers.
   Requantization scale distribution: one scale entry per 32-lane bank slice.
   A full 512-lane activation tile therefore consumes 16 scale entries.
+  Any Q16.16-to-INT8 quantization path divides the Q16.16 value by the stored
+  unsigned Q16.16 scale payload, then applies round-to-nearest-even and clamp.
+  In `embedding_quantizer.sv`, the active scale entry is selected by
+  `row_local = lane / N_TILE`, so each 32-lane row slice in the emitted
+  `M_TILE x N_TILE` batch tile consumes exactly one scale-vector entry.
   Nonlinear wrapper scale contract is fixed to:
     - RMSNorm consumes an input activation scale and an output quantization scale
     - SiLU consumes an input activation scale and an output quantization scale
@@ -217,6 +225,13 @@ B1. LM head precision policy
     - weights: INT8
     - accumulation: INT32
     - weight scales: static per-output-channel
+  The outer vocabulary loop is owned by `lm_head_controller.sv`.
+  It issues exactly 250 `VOCAB_TILE = 128` passes to cover the fixed
+  `VOCAB_SIZE = 32000`.
+  The partial-logit tile for each pass is tagged with:
+    - `tile_id = vocab_tile_idx`
+    - `elem_count = 128`
+    - `is_last = 1` only on the final vocab tile
   Greedy argmax is computed after the FPGA-side LM head.
   There is no higher-precision LM-head path in the production bitstream.
   A higher-precision LM-head path exists only in a separate validation build.
@@ -251,6 +266,7 @@ B4. Sampling feature set
   The initial implementation performs greedy argmax only.
   Top-k and top-p are excluded from the first hardware implementation.
   The token emitted by the FPGA is always the argmax token id from the final logits.
+  If two logits are exactly equal, the lower token id wins the tie-break.
 
 B5. HLS vs RTL partition for non-linear blocks
   SystemVerilog RTL implements:
@@ -318,6 +334,14 @@ B8. Debug / observability contract
     - quantization scales used by the captured block
   Captures are layer-scoped or decode-step-scoped, not full unbounded traces.
   Debug data is read back by the host after the selected step completes.
+  `DEBUG_STEP_SEL` encodes the target `block_id_e` value to capture.
+  Candidate debug sources present one-cycle tile-boundary capture pulses to
+  `debug_capture_mux.sv`.
+  `debug_capture_mux.sv` never backpressures compute-facing sources.
+  If more than one candidate matches in the same cycle, the lowest source index
+  wins.
+  If the downstream debug write path is not ready in a matching cycle, the
+  capture is dropped and the debug-overflow path is responsible for recording it.
 
 B9. AXI-Lite control-register map and launch semantics
   The control-plane register interface is fixed to 32-bit AXI-Lite words.

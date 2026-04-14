@@ -104,6 +104,20 @@ These production nonlinear-wrapper files now exist under `rtl/nonlinear/`.
 | `nonlinear/softmax_wrapper.sv` | RTL wrapper that dequantizes masked INT32 score tiles into Q16.16 chunks for `softmax_core_hls`, then emits the fixed probability scale and INT8 probability tile. | Regenerate the Phase 5 fixtures, then run `rtl/tb/tb_softmax_wrapper.sv`. |
 | `nonlinear/silu_wrapper.sv` | RTL wrapper that dequantizes gate-projection INT8 tiles into Q16.16 chunks for `silu_core_hls`, then requantizes the SiLU output back to INT8. | Regenerate the Phase 5 fixtures, then run `rtl/tb/tb_silu_wrapper.sv`. |
 
+## Phase 6 Embedding / FFN / LM-Head / Debug
+
+These Phase 6 production compute files now exist under `rtl/compute/`.
+
+| File | What it is | Smoke test |
+|------|------------|------------|
+| `compute/embedding_lookup.sv` | Embedding-row fetch controller that turns one token into one full `4096-byte` `TENSOR_EMBED` DMA request, assembles `128` `256-bit` beats, and emits one FP16 embedding row plus token metadata. | Regenerate the Phase 6 fixtures, then run `rtl/tb/tb_embedding_lookup.sv`. |
+| `compute/embedding_quantizer.sv` | FP16 embedding-row quantizer that batches up to `16` rows, emits one `BLOCK_EMBED` scale vector, and streams `64` row-major INT8 activation tiles into the decoder datapath. | Regenerate the Phase 6 fixtures, then run `rtl/tb/tb_embedding_quantizer.sv`. |
+| `compute/residual_add.sv` | Aligned INT32 residual leaf that captures matching `acc_bus` tiles, retags them as residual1/residual2, and sums active lanes with zero-filled tails. | Regenerate the Phase 6 fixtures, then run `rtl/tb/tb_residual_add.sv`. |
+| `compute/elementwise_mul.sv` | Real SwiGLU leaf that captures SiLU and `up_proj` activation tiles, multiplies them lane-wise as `INT8 x INT8 -> INT32`, and forwards the result to the down-projection requantization path. | Regenerate the Phase 6 fixtures, then run `rtl/tb/tb_elementwise_mul.sv`. |
+| `compute/lm_head_controller.sv` | Outer vocabulary-tile controller for LM head that reuses the one-tile GEMM scheduler 250 times, holds the final hidden-state context stable, and retags partial logits for the argmax path. | Run `rtl/tb/tb_lm_head_controller.sv`. |
+| `compute/argmax_reduction.sv` | Greedy vocab reduction leaf with lower-token-id tie-break on exact logit ties. | Regenerate the Phase 6 fixtures, then run `rtl/tb/tb_argmax_reduction.sv`. |
+| `compute/debug_capture_mux.sv` | Non-backpressuring debug-source selector that filters by layer/block selection and reports dropped captures when the downstream debug path is not ready. | Run `rtl/tb/tb_debug_capture_mux.sv`. |
+
 ## Synthesis Readiness
 
 The production RTL under `rtl/common/`, `rtl/control/`, and the later
