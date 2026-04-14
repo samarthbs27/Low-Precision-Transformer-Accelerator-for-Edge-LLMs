@@ -318,11 +318,25 @@ hardware implementation.
   KV-cache regions, and sequences the reused decoder-layer engine.
 - Inputs / buses:
   - mode and layer-start from `prefill_decode_controller.sv`
-  - layer-done from `gemm_op_scheduler.sv` and HLS wrappers
+  - per-block done from `gemm_op_scheduler.sv`, HLS wrappers, and the
+    non-GEMM datapath leaves
 - Outputs / buses:
   - `layer_id`
   - weight-region and KV-region selectors
+  - `block_start`
+  - `block_id`
+  - `q_head_id`
+  - derived `kv_head_id`
   - per-layer control tags
+- Concrete contract:
+  - `layer_start` pulses on the first logical block of each layer
+  - `block_start` pulses on every logical block transition inside the fixed
+    19-step decoder-layer schedule
+  - the repeated attention loop is expanded as:
+    `score -> causal_mask -> softmax -> weighted_sum` for each of the
+    `32` query heads
+  - `q_head_id` and `kv_head_id = q_head_id / KV_GROUPS` are valid only during
+    the repeated attention sub-schedule
 - Parallelism:
   - sequential across layers; no inter-layer compute parallelism in the first
     implementation.
@@ -350,12 +364,23 @@ hardware implementation.
   Q, K, V, score, weighted sum, O, gate, up, down, LM head.
 - Inputs / buses:
   - block-start from controller
+  - logical `block_id`
+  - per-block `q_head_id`
+  - per-block `kv_head_id`
   - buffer-ready and DMA-ready signals
 - Outputs / buses:
   - GEMM mode select
   - operand-route select
   - result-route select
   - tile loop counters
+- Concrete contract:
+  - in the production decoder-layer path, the scheduler accepts exactly one
+    GEMM-backed logical block at a time from `layer_controller.sv`
+  - `BLOCK_Q/K/V/SCORE/WEIGHTED_SUM/O/GATE/UP/DOWN/LM_HEAD` map one-to-one to
+    `GEMM_*` modes
+  - `done_pulse` marks completion of that one logical GEMM block
+  - the older `start_i` / `lm_head_only_i` full-layer path remains only for the
+    isolated scheduler smoke testbench
 - Parallelism:
   - tile-level pipelining and overlap with DMA fetch.
 
@@ -653,6 +678,14 @@ hardware implementation.
   - mode select from `gemm_op_scheduler.sv`
 - Outputs / buses:
   - `act_bus` and `wt_bus` to `shared_gemm_engine.sv`
+- Concrete contract:
+  - the routed operand tags are normalized to the active `block_id` /
+    `gemm_mode` selected by the scheduler
+  - projection-style GEMMs use the activation plus weight streams directly
+  - score GEMM uses the selected Q slice as `act_bus` and the routed K slice as
+    `wt_bus`
+  - weighted-sum GEMM uses the softmax-score tile as `act_bus` and the routed
+    V slice as `wt_bus`
 - Parallelism:
   - one route active per GEMM invocation, but route selection is pipelined and
     supports double-buffer overlap.
@@ -670,6 +703,12 @@ hardware implementation.
   - scale metadata from `scale_metadata_store.sv`
 - Outputs / buses:
   - routed result streams to buffers, requantizer, and final reduction blocks
+- Concrete contract:
+  - projection-style GEMMs and weighted-sum GEMMs route through the
+    requantization path
+  - score GEMM bypasses requantization and emits raw INT32 score tiles
+  - LM-head GEMM bypasses requantization and emits raw INT32 logit tiles
+  - routed output tags are normalized to the active `block_id` / `gemm_mode`
 - Parallelism:
   - one destination active per GEMM invocation; result writeback is pipelined.
 

@@ -148,6 +148,7 @@ Project/
       tb_lm_head_controller.sv
       tb_argmax_reduction.sv
       tb_debug_capture_mux.sv
+      tb_decoder_layer_smoke.sv
     control_fsm.sv
     top.sv
     mac_unit.sv
@@ -238,10 +239,20 @@ Project/
   - `argmax_reduction.sv`
   - `debug_capture_mux.sv`
   - local smoke tests for all seven
+- `rtl/control/layer_controller.sv`, `rtl/compute/gemm_op_scheduler.sv`,
+  `rtl/compute/gemm_operand_router.sv`, and `rtl/compute/gemm_result_router.sv`
+  now also include the concrete Phase 7 decoder-layer integration behavior:
+  - block-level layer sequencing across the fixed 19-step decoder order
+  - production block-driven GEMM scheduling
+  - normalized active-mode operand/result routing
+  - trace-backed decoder-layer smoke verification via
+    `rtl/tb/tb_decoder_layer_smoke.sv`
 - `model/export_fpga_vectors.py` writes canonical traces under `sim/golden_traces/`, emits packed `.memh` fixtures for the RTL benches, and regenerates the tracked RoPE ROM memh files under `rtl/compute/`.
+- `model/export_fpga_vectors.py` now also exports Phase 7 decoder-layer
+  schedule fixtures for prefill and decode under `sim/golden_traces/phase7/rtl/`.
 - `docs/` now describe the full TinyLlama prefill/decode accelerator that the project is building toward.
 
-The repo now contains hardened production modules through Phase 6. The next milestone is Phase 7 decoder-layer integration, where the already-verified blocks are wired into one full reused decoder-layer pass before top-level runtime integration begins.
+The repo now contains hardened production modules through Phase 7 decoder-layer integration. The next milestone is Phase 8 top-level runtime integration, where the reused layer engine is wired into the full prefill/decode kernel path.
 
 One practical note: the production RTL we are writing is intended to be
 synthesizable, but a passing Icarus smoke test is only the first gate. The

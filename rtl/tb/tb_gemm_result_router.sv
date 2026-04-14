@@ -53,7 +53,8 @@ module tb_gemm_result_router;
     scale_bus.data[0] = 32'h0001_0000;
 
     #1;
-    if (!quant_valid || !acc_ready || (quant_bus.data[0] != 8'sd12) || score_valid || lmhead_valid) begin
+    if (!quant_valid || !acc_ready || (quant_bus.data[0] != 8'sd12) || score_valid || lmhead_valid ||
+        (quant_bus.tag.block_id != BLOCK_Q) || (quant_bus.tag.gemm_mode != GEMM_Q)) begin
       $error("gemm_result_router quantized path mismatch");
       $finish;
     end
@@ -68,14 +69,16 @@ module tb_gemm_result_router;
     gemm_mode   = GEMM_SCORE;
     scale_valid = 1'b1;
     #1;
-    if (!score_valid || !acc_ready || (score_bus.data[0] != 32'sd12) || quant_valid || lmhead_valid) begin
+    if (!score_valid || !acc_ready || (score_bus.data[0] != 32'sd12) || quant_valid || lmhead_valid ||
+        (score_bus.tag.block_id != BLOCK_SCORE) || (score_bus.tag.gemm_mode != GEMM_SCORE)) begin
       $error("gemm_result_router score path mismatch");
       $finish;
     end
 
     gemm_mode = GEMM_LM_HEAD;
     #1;
-    if (!lmhead_valid || !acc_ready || (lmhead_bus.data[0] != 32'sd12) || quant_valid || score_valid) begin
+    if (!lmhead_valid || !acc_ready || (lmhead_bus.data[0] != 32'sd12) || quant_valid || score_valid ||
+        (lmhead_bus.tag.block_id != BLOCK_LM_HEAD) || (lmhead_bus.tag.gemm_mode != GEMM_LM_HEAD)) begin
       $error("gemm_result_router lm-head path mismatch");
       $finish;
     end

@@ -9,6 +9,10 @@ module tb_gemm_op_scheduler;
   logic                 start;
   logic                 abort_req;
   logic                 lm_head_only;
+  logic                 block_start;
+  block_id_e            block_start_id;
+  logic [Q_HEAD_ID_W-1:0]  block_q_head_id;
+  logic [KV_HEAD_ID_W-1:0] block_kv_head_id;
   logic                 dma_ready;
   logic                 buffer_ready;
   logic                 step_ready;
@@ -48,6 +52,10 @@ module tb_gemm_op_scheduler;
     .start_i(start),
     .abort_req_i(abort_req),
     .lm_head_only_i(lm_head_only),
+    .block_start_i(block_start),
+    .block_id_i(block_start_id),
+    .block_q_head_id_i(block_q_head_id),
+    .block_kv_head_id_i(block_kv_head_id),
     .dma_ready_i(dma_ready),
     .buffer_ready_i(buffer_ready),
     .step_ready_i(step_ready),
@@ -135,6 +143,10 @@ module tb_gemm_op_scheduler;
     start          = 1'b0;
     abort_req      = 1'b0;
     lm_head_only   = 1'b0;
+    block_start    = 1'b0;
+    block_start_id = BLOCK_NONE;
+    block_q_head_id = '0;
+    block_kv_head_id = '0;
     dma_ready      = 1'b1;
     buffer_ready   = 1'b1;
     step_ready     = 1'b1;
@@ -198,6 +210,73 @@ module tb_gemm_op_scheduler;
 
     if (!done_pulse || (lmhead_steps != 128)) begin
       $error("gemm_op_scheduler lm-head schedule mismatch");
+      $finish;
+    end
+
+    @(negedge clk);
+
+    reset_counts();
+    seq_count      = 16;
+    kv_token_count = 16;
+
+    @(negedge clk);
+    block_start_id  <= BLOCK_Q;
+    block_q_head_id <= '0;
+    block_kv_head_id <= '0;
+    block_start     <= 1'b1;
+    @(negedge clk);
+    block_start <= 1'b0;
+    #1;
+    sample_step();
+
+    guard = 0;
+    while (!done_pulse && (guard < 3000)) begin
+      @(negedge clk);
+      guard++;
+      if (step_valid && ((gemm_mode != GEMM_Q) || (block_id != BLOCK_Q))) begin
+        $error("gemm_op_scheduler block-driven Q mode mismatch");
+        $finish;
+      end
+      sample_step();
+    end
+
+    if (!done_pulse || (q_steps != 2048)) begin
+      $error("gemm_op_scheduler block-driven Q schedule mismatch q_steps=%0d done_pulse=%0b guard=%0d", q_steps, done_pulse, guard);
+      $finish;
+    end
+
+    @(negedge clk);
+
+    reset_counts();
+    @(negedge clk);
+    block_start_id   <= BLOCK_WEIGHTED_SUM;
+    block_q_head_id  <= Q_HEAD_ID_W'(17);
+    block_kv_head_id <= KV_HEAD_ID_W'(2);
+    block_start      <= 1'b1;
+    @(negedge clk);
+    block_start <= 1'b0;
+    #1;
+    sample_step();
+
+    guard = 0;
+    while (!done_pulse && (guard < 64)) begin
+      @(negedge clk);
+      guard++;
+      if (step_valid) begin
+        if ((gemm_mode != GEMM_WEIGHTED_SUM) || (block_id != BLOCK_WEIGHTED_SUM)) begin
+          $error("gemm_op_scheduler block-driven WEIGHTED_SUM mode mismatch");
+          $finish;
+        end
+        if ((q_head_id != Q_HEAD_ID_W'(17)) || (kv_head_id != KV_HEAD_ID_W'(2))) begin
+          $error("gemm_op_scheduler block-driven head forwarding mismatch");
+          $finish;
+        end
+      end
+      sample_step();
+    end
+
+    if (!done_pulse || (weighted_sum_steps != 2)) begin
+      $error("gemm_op_scheduler block-driven WEIGHTED_SUM schedule mismatch weighted_sum_steps=%0d done_pulse=%0b guard=%0d", weighted_sum_steps, done_pulse, guard);
       $finish;
     end
 

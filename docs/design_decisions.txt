@@ -197,6 +197,17 @@ A14. On-chip controller replaces per-GEMM host sequencing
     layer_idx = 0..21
   and inside each layer it schedules the required block sequence and memory moves.
   The host never issues a PCIe round trip per GEMM in the deployed design.
+  The frozen Phase 7 control split is:
+    - `layer_controller.sv` owns the exact logical block order inside one
+      decoder layer, including the repeated
+      `score -> mask -> softmax -> weighted_sum` loop across all 32 query heads
+    - `layer_controller.sv` emits `block_start`, `block_id`, `q_head_id`, and
+      derived `kv_head_id` so non-GEMM and GEMM-backed blocks see the same
+      per-layer context contract
+    - `gemm_op_scheduler.sv` is block-driven in the production datapath and
+      expands one logical GEMM block into its tile loop
+    - the older full-layer `start_i` scheduler path is retained only for the
+      isolated Phase 3 scheduler smoke test
 
 A15. Throughput target and engine width
   The implementation target is a 512-lane INT8 GEMM engine on U55C.

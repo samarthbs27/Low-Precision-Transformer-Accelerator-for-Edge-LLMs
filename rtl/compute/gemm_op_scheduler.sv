@@ -1,30 +1,34 @@
 import tinyllama_pkg::*;
 
 module gemm_op_scheduler (
-  input  logic                 ap_clk,
-  input  logic                 ap_rst_n,
-  input  logic                 start_i,
-  input  logic                 abort_req_i,
-  input  logic                 lm_head_only_i,
-  input  logic                 dma_ready_i,
-  input  logic                 buffer_ready_i,
-  input  logic                 step_ready_i,
-  input  logic [COUNT_W-1:0]   seq_count_i,
-  input  logic [COUNT_W-1:0]   kv_token_count_i,
-  output logic                 busy_o,
-  output logic                 done_pulse_o,
-  output logic                 step_valid_o,
-  output gemm_mode_e           gemm_mode_o,
-  output block_id_e            block_id_o,
-  output logic                 clear_acc_o,
-  output logic                 emit_acc_o,
-  output logic [TILE_ID_W-1:0] m_tile_idx_o,
-  output logic [TILE_ID_W-1:0] n_tile_idx_o,
-  output logic [TILE_ID_W-1:0] k_tile_idx_o,
-  output logic [TILE_ID_W-1:0] m_tile_count_o,
-  output logic [TILE_ID_W-1:0] n_tile_count_o,
-  output logic [TILE_ID_W-1:0] k_tile_count_o,
-  output logic [Q_HEAD_ID_W-1:0]  q_head_id_o,
+  input  logic                   ap_clk,
+  input  logic                   ap_rst_n,
+  input  logic                   start_i,
+  input  logic                   abort_req_i,
+  input  logic                   lm_head_only_i,
+  input  logic                   block_start_i,
+  input  block_id_e              block_id_i,
+  input  logic [Q_HEAD_ID_W-1:0] block_q_head_id_i,
+  input  logic [KV_HEAD_ID_W-1:0] block_kv_head_id_i,
+  input  logic                   dma_ready_i,
+  input  logic                   buffer_ready_i,
+  input  logic                   step_ready_i,
+  input  logic [COUNT_W-1:0]     seq_count_i,
+  input  logic [COUNT_W-1:0]     kv_token_count_i,
+  output logic                   busy_o,
+  output logic                   done_pulse_o,
+  output logic                   step_valid_o,
+  output gemm_mode_e             gemm_mode_o,
+  output block_id_e              block_id_o,
+  output logic                   clear_acc_o,
+  output logic                   emit_acc_o,
+  output logic [TILE_ID_W-1:0]   m_tile_idx_o,
+  output logic [TILE_ID_W-1:0]   n_tile_idx_o,
+  output logic [TILE_ID_W-1:0]   k_tile_idx_o,
+  output logic [TILE_ID_W-1:0]   m_tile_count_o,
+  output logic [TILE_ID_W-1:0]   n_tile_count_o,
+  output logic [TILE_ID_W-1:0]   k_tile_count_o,
+  output logic [Q_HEAD_ID_W-1:0] q_head_id_o,
   output logic [KV_HEAD_ID_W-1:0] kv_head_id_o
 );
 
@@ -41,18 +45,20 @@ module gemm_op_scheduler (
     SOP_LM_HEAD      = 4'd9
   } sched_op_e;
 
-  typedef enum logic {
-    SCHED_IDLE = 1'b0,
-    SCHED_RUN  = 1'b1
-  } sched_state_e;
+  typedef enum logic [1:0] {
+    RUNMODE_IDLE   = 2'd0,
+    RUNMODE_LEGACY = 2'd1,
+    RUNMODE_BLOCK  = 2'd2
+  } run_mode_e;
 
-  sched_state_e          state_q;
+  run_mode_e             run_mode_q;
   sched_op_e             op_q;
   logic                  lm_head_only_q;
   logic [TILE_ID_W-1:0]  m_tile_q;
   logic [TILE_ID_W-1:0]  n_tile_q;
   logic [TILE_ID_W-1:0]  k_tile_q;
   logic [Q_HEAD_ID_W-1:0] q_head_q;
+  logic [KV_HEAD_ID_W-1:0] kv_head_q;
   logic                  step_fire_d;
   logic                  last_m_d;
   logic                  last_n_d;
@@ -125,6 +131,46 @@ module gemm_op_scheduler (
     end
   endfunction
 
+  function automatic logic block_is_gemm(
+    input block_id_e block_id
+  );
+    begin
+      unique case (block_id)
+        BLOCK_Q,
+        BLOCK_K,
+        BLOCK_V,
+        BLOCK_SCORE,
+        BLOCK_WEIGHTED_SUM,
+        BLOCK_O,
+        BLOCK_GATE,
+        BLOCK_UP,
+        BLOCK_DOWN,
+        BLOCK_LM_HEAD: block_is_gemm = 1'b1;
+        default:       block_is_gemm = 1'b0;
+      endcase
+    end
+  endfunction
+
+  function automatic sched_op_e op_from_block_id(
+    input block_id_e block_id
+  );
+    begin
+      unique case (block_id)
+        BLOCK_Q:            op_from_block_id = SOP_Q;
+        BLOCK_K:            op_from_block_id = SOP_K;
+        BLOCK_V:            op_from_block_id = SOP_V;
+        BLOCK_SCORE:        op_from_block_id = SOP_SCORE;
+        BLOCK_WEIGHTED_SUM: op_from_block_id = SOP_WEIGHTED_SUM;
+        BLOCK_O:            op_from_block_id = SOP_O;
+        BLOCK_GATE:         op_from_block_id = SOP_GATE;
+        BLOCK_UP:           op_from_block_id = SOP_UP;
+        BLOCK_DOWN:         op_from_block_id = SOP_DOWN;
+        BLOCK_LM_HEAD:      op_from_block_id = SOP_LM_HEAD;
+        default:            op_from_block_id = SOP_Q;
+      endcase
+    end
+  endfunction
+
   function automatic logic [TILE_ID_W-1:0] m_tiles_for_op(
     input sched_op_e op,
     input logic [COUNT_W-1:0] seq_count
@@ -173,7 +219,7 @@ module gemm_op_scheduler (
     end
   endfunction
 
-  assign busy_o         = (state_q == SCHED_RUN);
+  assign busy_o         = (run_mode_q != RUNMODE_IDLE);
   assign gemm_mode_o    = gemm_mode_from_op(op_q);
   assign block_id_o     = block_id_from_op(op_q);
   assign m_tile_idx_o   = m_tile_q;
@@ -182,9 +228,9 @@ module gemm_op_scheduler (
   assign m_tile_count_o = m_tiles_for_op(op_q, seq_count_i);
   assign n_tile_count_o = n_tiles_for_op(op_q, kv_token_count_i);
   assign k_tile_count_o = k_tiles_for_op(op_q, kv_token_count_i);
-  assign q_head_id_o    = (op_q == SOP_SCORE || op_q == SOP_WEIGHTED_SUM) ? q_head_q : '0;
-  assign kv_head_id_o   = (op_q == SOP_SCORE || op_q == SOP_WEIGHTED_SUM) ? KV_HEAD_ID_W'(q_head_q / KV_GROUPS) : '0;
-  assign step_valid_o   = (state_q == SCHED_RUN) && dma_ready_i && buffer_ready_i;
+  assign q_head_id_o    = q_head_q;
+  assign kv_head_id_o   = kv_head_q;
+  assign step_valid_o   = (run_mode_q != RUNMODE_IDLE) && dma_ready_i && buffer_ready_i;
   assign clear_acc_o    = step_valid_o && (k_tile_q == '0);
   assign emit_acc_o     = step_valid_o && (k_tile_q == (k_tile_count_o - 1'b1));
   assign last_m_d       = (m_tile_q == (m_tile_count_o - 1'b1));
@@ -196,117 +242,132 @@ module gemm_op_scheduler (
     done_pulse_o <= 1'b0;
 
     if (!ap_rst_n) begin
-      state_q         <= SCHED_IDLE;
+      run_mode_q      <= RUNMODE_IDLE;
       op_q            <= SOP_Q;
       lm_head_only_q  <= 1'b0;
       m_tile_q        <= '0;
       n_tile_q        <= '0;
       k_tile_q        <= '0;
       q_head_q        <= '0;
+      kv_head_q       <= '0;
     end else begin
-      if ((state_q == SCHED_RUN) && abort_req_i) begin
-        state_q        <= SCHED_IDLE;
-        done_pulse_o   <= 1'b1;
-        op_q           <= SOP_Q;
-        lm_head_only_q <= 1'b0;
-        m_tile_q       <= '0;
-        n_tile_q       <= '0;
-        k_tile_q       <= '0;
-        q_head_q       <= '0;
+      if ((run_mode_q != RUNMODE_IDLE) && abort_req_i) begin
+        run_mode_q      <= RUNMODE_IDLE;
+        done_pulse_o    <= 1'b1;
+        op_q            <= SOP_Q;
+        lm_head_only_q  <= 1'b0;
+        m_tile_q        <= '0;
+        n_tile_q        <= '0;
+        k_tile_q        <= '0;
+        q_head_q        <= '0;
+        kv_head_q       <= '0;
       end else begin
-        unique case (state_q)
-          SCHED_IDLE: begin
-            if (start_i) begin
-              state_q        <= SCHED_RUN;
-              op_q           <= lm_head_only_i ? SOP_LM_HEAD : SOP_Q;
-              lm_head_only_q <= lm_head_only_i;
-              m_tile_q       <= '0;
-              n_tile_q       <= '0;
-              k_tile_q       <= '0;
+        if (run_mode_q == RUNMODE_IDLE) begin
+          if (block_start_i && block_is_gemm(block_id_i)) begin
+            run_mode_q      <= RUNMODE_BLOCK;
+            op_q            <= op_from_block_id(block_id_i);
+            lm_head_only_q  <= 1'b0;
+            m_tile_q        <= '0;
+            n_tile_q        <= '0;
+            k_tile_q        <= '0;
+            q_head_q        <= block_q_head_id_i;
+            kv_head_q       <= block_kv_head_id_i;
+          end else if (start_i) begin
+            run_mode_q      <= RUNMODE_LEGACY;
+            op_q            <= lm_head_only_i ? SOP_LM_HEAD : SOP_Q;
+            lm_head_only_q  <= lm_head_only_i;
+            m_tile_q        <= '0;
+            n_tile_q        <= '0;
+            k_tile_q        <= '0;
+            q_head_q        <= '0;
+            kv_head_q       <= '0;
+          end
+        end else if (step_fire_d) begin
+          if (!last_k_d) begin
+            k_tile_q <= k_tile_q + 1'b1;
+          end else if (!last_n_d) begin
+            k_tile_q <= '0;
+            n_tile_q <= n_tile_q + 1'b1;
+          end else if (!last_m_d) begin
+            k_tile_q <= '0;
+            n_tile_q <= '0;
+            m_tile_q <= m_tile_q + 1'b1;
+          end else begin
+            k_tile_q <= '0;
+            n_tile_q <= '0;
+            m_tile_q <= '0;
+
+            if (run_mode_q == RUNMODE_BLOCK) begin
+              run_mode_q     <= RUNMODE_IDLE;
+              done_pulse_o   <= 1'b1;
+              op_q           <= SOP_Q;
               q_head_q       <= '0;
-            end
-          end
+              kv_head_q      <= '0;
+            end else begin
+              unique case (op_q)
+                SOP_Q: begin
+                  op_q <= SOP_K;
+                end
 
-          SCHED_RUN: begin
-            if (step_fire_d) begin
-              if (!last_k_d) begin
-                k_tile_q <= k_tile_q + 1'b1;
-              end else if (!last_n_d) begin
-                k_tile_q <= '0;
-                n_tile_q <= n_tile_q + 1'b1;
-              end else if (!last_m_d) begin
-                k_tile_q <= '0;
-                n_tile_q <= '0;
-                m_tile_q <= m_tile_q + 1'b1;
-              end else begin
-                k_tile_q <= '0;
-                n_tile_q <= '0;
-                m_tile_q <= '0;
+                SOP_K: begin
+                  op_q <= SOP_V;
+                end
 
-                unique case (op_q)
-                  SOP_Q: begin
-                    op_q <= SOP_K;
-                  end
+                SOP_V: begin
+                  op_q     <= SOP_SCORE;
+                  q_head_q <= '0;
+                  kv_head_q <= '0;
+                end
 
-                  SOP_K: begin
-                    op_q <= SOP_V;
-                  end
+                SOP_SCORE: begin
+                  op_q <= SOP_WEIGHTED_SUM;
+                end
 
-                  SOP_V: begin
-                    op_q    <= SOP_SCORE;
+                SOP_WEIGHTED_SUM: begin
+                  if (q_head_q == (N_Q_HEADS - 1)) begin
+                    op_q     <= SOP_O;
                     q_head_q <= '0;
+                    kv_head_q <= '0;
+                  end else begin
+                    op_q      <= SOP_SCORE;
+                    q_head_q  <= q_head_q + 1'b1;
+                    kv_head_q <= KV_HEAD_ID_W'((q_head_q + 1'b1) / KV_GROUPS);
                   end
+                end
 
-                  SOP_SCORE: begin
-                    op_q <= SOP_WEIGHTED_SUM;
-                  end
+                SOP_O: begin
+                  op_q <= SOP_GATE;
+                end
 
-                  SOP_WEIGHTED_SUM: begin
-                    if (q_head_q == (N_Q_HEADS - 1)) begin
-                      op_q     <= SOP_O;
-                      q_head_q <= '0;
-                    end else begin
-                      op_q     <= SOP_SCORE;
-                      q_head_q <= q_head_q + 1'b1;
-                    end
-                  end
+                SOP_GATE: begin
+                  op_q <= SOP_UP;
+                end
 
-                  SOP_O: begin
-                    op_q <= SOP_GATE;
-                  end
+                SOP_UP: begin
+                  op_q <= SOP_DOWN;
+                end
 
-                  SOP_GATE: begin
-                    op_q <= SOP_UP;
-                  end
+                SOP_DOWN,
+                SOP_LM_HEAD: begin
+                  run_mode_q      <= RUNMODE_IDLE;
+                  done_pulse_o    <= 1'b1;
+                  op_q            <= SOP_Q;
+                  lm_head_only_q  <= 1'b0;
+                  q_head_q        <= '0;
+                  kv_head_q       <= '0;
+                end
 
-                  SOP_UP: begin
-                    op_q <= SOP_DOWN;
-                  end
-
-                  SOP_DOWN,
-                  SOP_LM_HEAD: begin
-                    state_q        <= SCHED_IDLE;
-                    done_pulse_o   <= 1'b1;
-                    op_q           <= SOP_Q;
-                    lm_head_only_q <= 1'b0;
-                    q_head_q       <= '0;
-                  end
-
-                  default: begin
-                    state_q      <= SCHED_IDLE;
-                    done_pulse_o <= 1'b1;
-                    op_q         <= SOP_Q;
-                    q_head_q     <= '0;
-                  end
-                endcase
-              end
+                default: begin
+                  run_mode_q    <= RUNMODE_IDLE;
+                  done_pulse_o  <= 1'b1;
+                  op_q          <= SOP_Q;
+                  q_head_q      <= '0;
+                  kv_head_q     <= '0;
+                end
+              endcase
             end
           end
-
-          default: begin
-            state_q <= SCHED_IDLE;
-          end
-        endcase
+        end
       end
     end
   end

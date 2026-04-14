@@ -44,7 +44,7 @@ These are the first production control-path modules now implemented under `rtl/c
 | `control/kernel_reg_file.sv` | Concrete launch/status register file with the frozen control-register map, sticky status bits, and command outputs. | Run `rtl/tb/tb_axi_lite_ctrl_slave.sv`. |
 | `control/host_cmd_status_mgr.sv` | Stub PC30 command/status DMA manager that fetches one command beat per launch and writes one status beat on terminal events. | Run `rtl/tb/tb_host_cmd_status_mgr.sv`. |
 | `control/prefill_decode_controller.sv` | Runtime controller stub for `IDLE -> prefill/decode layer pass -> LM head -> token/stop -> DONE`. | Run `rtl/tb/tb_prefill_decode_controller.sv`. |
-| `control/layer_controller.sv` | Reused 22-layer loop controller that iterates `layer_id = 0..21` for one full decoder pass. | Run `rtl/tb/tb_prefill_decode_controller.sv`. |
+| `control/layer_controller.sv` | Reused 22-layer controller that now emits the real per-layer `block_start/block_id/q_head_id/kv_head_id` schedule for the fixed decoder-layer block order. | Run `rtl/tb/tb_prefill_decode_controller.sv` and `rtl/tb/tb_decoder_layer_smoke.sv`. |
 | `control/stop_condition_unit.sv` | Stop-condition block for EOS, max-token, and host-abort termination. | Run `rtl/tb/tb_prefill_decode_controller.sv`. |
 
 When a command in this folder produces simulator output, waveform dumps, or logs, put them under `sim/`.
@@ -77,9 +77,9 @@ These production compute-path files now exist under `rtl/compute/`.
 | `compute/accumulator_bank.sv` | 512-lane INT32 accumulator storage with explicit clear/load/tag update behavior. | Run `rtl/tb/tb_accumulator_bank.sv`. |
 | `compute/requantize_unit.sv` | Bank-scaled INT32->INT8 requantizer using unsigned Q16.16 multipliers, round-to-nearest-even, and saturating clamp. | Run `rtl/tb/tb_requantize_unit.sv`, which now also consumes exported Phase 3 trace fixtures. |
 | `compute/shared_gemm_engine.sv` | Output-stationary 512-lane shared GEMM core with clear-on-first-slice accumulation and buffered result snapshotting. | Run `rtl/tb/tb_shared_gemm_engine.sv`, which now replays an exported Phase 3 q-projection trace slice. |
-| `compute/gemm_operand_router.sv` | Mode-driven operand selector that routes activation, weight, score, and KV tiles into the shared GEMM core. | Run `rtl/tb/tb_gemm_operand_router.sv`. |
-| `compute/gemm_result_router.sv` | Mode-driven result router that emits quantized projection outputs and raw score/LM-head accumulators to the next stage. | Run `rtl/tb/tb_gemm_result_router.sv`. |
-| `compute/gemm_op_scheduler.sv` | Deterministic tile-loop scheduler for the GEMM-backed decoder-layer operations and LM-head-only mode. | Run `rtl/tb/tb_gemm_op_scheduler.sv`. |
+| `compute/gemm_operand_router.sv` | Mode-driven operand selector that routes activation, weight, score, and KV tiles into the shared GEMM core and normalizes routed operand tags to the active GEMM block. | Run `rtl/tb/tb_gemm_operand_router.sv` and `rtl/tb/tb_decoder_layer_smoke.sv`. |
+| `compute/gemm_result_router.sv` | Mode-driven result router that emits quantized projection outputs and raw score/LM-head accumulators to the next stage with normalized active-mode output tags. | Run `rtl/tb/tb_gemm_result_router.sv` and `rtl/tb/tb_decoder_layer_smoke.sv`. |
+| `compute/gemm_op_scheduler.sv` | Deterministic tile-loop scheduler with a production block-driven mode for decoder-layer integration plus the retained legacy full-layer mode used by the isolated GEMM scheduler smoke bench. | Run `rtl/tb/tb_gemm_op_scheduler.sv` and `rtl/tb/tb_decoder_layer_smoke.sv`. |
 
 ## Phase 4 Attention-Path Leaves
 
@@ -117,6 +117,18 @@ These Phase 6 production compute files now exist under `rtl/compute/`.
 | `compute/lm_head_controller.sv` | Outer vocabulary-tile controller for LM head that reuses the one-tile GEMM scheduler 250 times, holds the final hidden-state context stable, and retags partial logits for the argmax path. | Run `rtl/tb/tb_lm_head_controller.sv`. |
 | `compute/argmax_reduction.sv` | Greedy vocab reduction leaf with lower-token-id tie-break on exact logit ties. | Regenerate the Phase 6 fixtures, then run `rtl/tb/tb_argmax_reduction.sv`. |
 | `compute/debug_capture_mux.sv` | Non-backpressuring debug-source selector that filters by layer/block selection and reports dropped captures when the downstream debug path is not ready. | Run `rtl/tb/tb_debug_capture_mux.sv`. |
+
+## Phase 7 Decoder-Layer Integration
+
+These Phase 7 integration files now harden the reused decoder-layer path.
+
+| File | What it is | Smoke test |
+|------|------------|------------|
+| `control/layer_controller.sv` | Concrete per-layer orchestrator for the fixed `RMSNorm -> attention -> FFN -> requantize` block order, including the repeated `score -> mask -> softmax -> weighted_sum` attention loop across all `32` query heads. | Run `rtl/tb/tb_decoder_layer_smoke.sv`. |
+| `compute/gemm_op_scheduler.sv` | Production block-driven GEMM tile scheduler that expands one logical GEMM block at a time from `layer_controller.sv`. | Run `rtl/tb/tb_decoder_layer_smoke.sv`. |
+| `compute/gemm_operand_router.sv` | Integration-ready operand router used by the decoder-layer smoke path to validate the correct source pair for projection, score, and weighted-sum GEMMs. | Run `rtl/tb/tb_decoder_layer_smoke.sv`. |
+| `compute/gemm_result_router.sv` | Integration-ready result router used by the decoder-layer smoke path to validate quantized-vs-raw score/LM-head routing. | Run `rtl/tb/tb_decoder_layer_smoke.sv`. |
+| `tb/tb_decoder_layer_smoke.sv` | Exported Phase 7 trace-backed smoke test for one concrete decoder-layer pass at real TinyLlama dimensions and prefill/decode token counts. | Regenerate the Phase 7 fixtures, then run `rtl/tb/tb_decoder_layer_smoke.sv`. |
 
 ## Synthesis Readiness
 

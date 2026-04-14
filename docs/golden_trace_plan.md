@@ -111,6 +111,9 @@ Why:
 
 - this is where individually-correct blocks can still disagree on tags, tile
   ordering, quantization placement, or cache semantics
+- the Phase 7 integration gate specifically uses exported decoder-layer
+  schedule fixtures so the RTL checks the real TinyLlama prefill/decode layer
+  order against deterministic traces, not hand-maintained ad hoc arrays
 
 ---
 
@@ -136,6 +139,22 @@ sim/golden_traces/
   phase7/
   phase8/
 ```
+
+Phase 7 exports also write packed RTL fixtures under:
+
+```text
+sim/golden_traces/phase7/rtl/
+```
+
+Those fixtures currently carry:
+
+- `seq_count`
+- `kv_token_count`
+- decoder-layer logical `block_id` order
+- per-block `q_head_id`
+- per-block `kv_head_id`
+- expected GEMM mode per block
+- expected GEMM tile-step count per block
 
 ---
 

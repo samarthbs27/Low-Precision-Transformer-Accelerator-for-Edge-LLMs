@@ -62,7 +62,9 @@ module tb_gemm_operand_router;
 
     #1;
     if (!operands_valid || !act_ready || !weight_ready ||
-        (routed_act.data[0] != 8'sd7) || (routed_wt.data[0] != -8'sd5)) begin
+        (routed_act.data[0] != 8'sd7) || (routed_wt.data[0] != -8'sd5) ||
+        (routed_act.tag.block_id != BLOCK_Q) || (routed_act.tag.gemm_mode != GEMM_Q) ||
+        (routed_wt.tag.block_id != BLOCK_Q) || (routed_wt.tag.gemm_mode != GEMM_Q)) begin
       $error("gemm_operand_router Q-path mismatch");
       $finish;
     end
@@ -70,7 +72,9 @@ module tb_gemm_operand_router;
     gemm_mode = GEMM_SCORE;
     #1;
     if (!operands_valid || !act_ready || !kv_ready || weight_ready || score_ready ||
-        (routed_act.data[0] != 8'sd7) || (routed_wt.data[0] != 8'sd9)) begin
+        (routed_act.data[0] != 8'sd7) || (routed_wt.data[0] != 8'sd9) ||
+        (routed_act.tag.block_id != BLOCK_SCORE) || (routed_act.tag.gemm_mode != GEMM_SCORE) ||
+        (routed_wt.tag.block_id != BLOCK_SCORE) || (routed_wt.tag.gemm_mode != GEMM_SCORE)) begin
       $error("gemm_operand_router SCORE-path mismatch");
       $finish;
     end
@@ -78,7 +82,9 @@ module tb_gemm_operand_router;
     gemm_mode = GEMM_WEIGHTED_SUM;
     #1;
     if (!operands_valid || !score_ready || !kv_ready || act_ready ||
-        (routed_act.data[0] != 8'sd22) || (routed_wt.data[0] != 8'sd9)) begin
+        (routed_act.data[0] != 8'sd22) || (routed_wt.data[0] != 8'sd9) ||
+        (routed_act.tag.block_id != BLOCK_WEIGHTED_SUM) || (routed_act.tag.gemm_mode != GEMM_WEIGHTED_SUM) ||
+        (routed_wt.tag.block_id != BLOCK_WEIGHTED_SUM) || (routed_wt.tag.gemm_mode != GEMM_WEIGHTED_SUM)) begin
       $error("gemm_operand_router WEIGHTED_SUM-path mismatch");
       $finish;
     end

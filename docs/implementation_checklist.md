@@ -332,11 +332,11 @@ Files in this phase are integration files rather than brand-new primitives.
 
 | Order | File | Type | Purpose | Depends on | First pass | First verification |
 |---|---|---|---|---|---|---|
-| 7.1 | `rtl/tb/tb_decoder_layer_smoke.sv` | TB | Synthetic smoke test for one reused decoder-layer path | phases 1-6 | instantiate stubs and verify schedule order only | run smoke after full layer wiring |
-| 7.2 | `rtl/control/layer_controller.sv` | RTL update | Promote from stub to real per-layer orchestrator | all layer-level blocks | real block sequencing | decoder-layer smoke test |
-| 7.3 | `rtl/compute/gemm_op_scheduler.sv` | RTL update | Promote from stub to real operation/tile scheduler | GEMM, buffers, layer controller | real mode issue order | decoder-layer smoke test |
-| 7.4 | `rtl/compute/gemm_operand_router.sv` | RTL update | Real source selection for Q/K/V/O/FFN/LM-head modes | buffers, scheduler | real routing | decoder-layer smoke test |
-| 7.5 | `rtl/compute/gemm_result_router.sv` | RTL update | Real result routing into Q/K/V, score, FFN, KV writeback, LM-head | requantize, buffers, scheduler | real routing | decoder-layer smoke test |
+| 7.1 | `rtl/tb/tb_decoder_layer_smoke.sv` | TB | Trace-backed smoke test for one reused decoder-layer path | phases 1-6 plus `model/export_fpga_vectors.py` | verify exported decoder-layer schedule order and per-block GEMM step counts | run smoke after full layer wiring |
+| 7.2 | `rtl/control/layer_controller.sv` | RTL update | Promote from stub to real per-layer orchestrator | all layer-level blocks | real block sequencing with per-block `block_start/block_id/q_head_id/kv_head_id` | decoder-layer smoke test |
+| 7.3 | `rtl/compute/gemm_op_scheduler.sv` | RTL update | Promote from stub to real operation/tile scheduler | GEMM, buffers, layer controller | real block-driven mode issue order plus retained legacy bench mode | decoder-layer smoke test |
+| 7.4 | `rtl/compute/gemm_operand_router.sv` | RTL update | Real source selection for Q/K/V/O/FFN/LM-head modes | buffers, scheduler | real routing with normalized active-mode operand tags | decoder-layer smoke test |
+| 7.5 | `rtl/compute/gemm_result_router.sv` | RTL update | Real result routing into Q/K/V, score, FFN, KV writeback, LM-head | requantize, buffers, scheduler | real routing with normalized active-mode output tags | decoder-layer smoke test |
 
 ## Phase 8 - Full Runtime Integration
 

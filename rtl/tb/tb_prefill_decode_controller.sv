@@ -37,12 +37,17 @@ module tb_prefill_decode_controller;
   logic               layer_ctrl_busy;
   logic               layer_ctrl_done;
   logic               per_layer_start;
+  logic               block_start;
+  logic               block_valid;
   logic               layer_ctx_valid;
   runtime_mode_e      layer_runtime_mode;
   logic [LAYER_ID_W-1:0] layer_id;
   logic [LAYER_ID_W-1:0] weight_layer_sel;
   logic [LAYER_ID_W-1:0] kv_layer_sel;
-  logic               layer_step_done;
+  block_id_e          block_id;
+  logic [Q_HEAD_ID_W-1:0] q_head_id;
+  logic [KV_HEAD_ID_W-1:0] kv_head_id;
+  logic               block_done;
 
   prefill_decode_controller dut_ctrl (
     .ap_clk                  (clk),
@@ -81,15 +86,20 @@ module tb_prefill_decode_controller;
     .start_i          (runtime_layer_start),
     .abort_req_i      (abort_req),
     .runtime_mode_i   (active_mode),
-    .layer_step_done_i(layer_step_done),
+    .block_done_i     (block_done),
     .busy_o           (layer_ctrl_busy),
     .run_done_o       (layer_ctrl_done),
     .layer_start_o    (per_layer_start),
     .layer_ctx_valid_o(layer_ctx_valid),
+    .block_valid_o    (block_valid),
+    .block_start_o    (block_start),
     .runtime_mode_o   (layer_runtime_mode),
     .layer_id_o       (layer_id),
     .weight_layer_sel_o(weight_layer_sel),
-    .kv_layer_sel_o   (kv_layer_sel)
+    .kv_layer_sel_o   (kv_layer_sel),
+    .block_id_o       (block_id),
+    .q_head_id_o      (q_head_id),
+    .kv_head_id_o     (kv_head_id)
   );
 
   stop_condition_unit dut_stop (
@@ -109,29 +119,40 @@ module tb_prefill_decode_controller;
 
   task automatic drive_layer_pass;
     int unsigned expected_layer;
+    int unsigned expected_block;
     int unsigned wait_cycles;
     begin
       for (expected_layer = 0; expected_layer < N_LAYERS; expected_layer++) begin
-        wait_cycles = 0;
-        while (!per_layer_start) begin
-          @(negedge clk);
-          wait_cycles++;
-          if (wait_cycles > 128) begin
-            $error("layer pass timeout waiting for per_layer_start at expected layer %0d", expected_layer);
+        for (expected_block = 0; expected_block < (6 + (4 * N_Q_HEADS) + 12); expected_block++) begin
+          wait_cycles = 0;
+          while (!block_start) begin
+            @(negedge clk);
+            wait_cycles++;
+            if (wait_cycles > 256) begin
+              $error("layer pass timeout waiting for block_start at expected layer %0d block %0d", expected_layer, expected_block);
+              $finish;
+            end
+          end
+          if ((expected_block == 0) && !per_layer_start) begin
+            $error("layer_controller expected layer_start on first block of layer %0d", expected_layer);
             $finish;
           end
+          if (layer_id !== expected_layer[LAYER_ID_W-1:0]) begin
+            $error("layer_controller expected layer_id %0d, got %0d", expected_layer, layer_id);
+            $finish;
+          end
+          if (weight_layer_sel !== layer_id || kv_layer_sel !== layer_id) begin
+            $error("layer selectors expected to match layer_id %0d", layer_id);
+            $finish;
+          end
+          if (!block_valid || !layer_ctx_valid) begin
+            $error("layer_controller expected valid context on layer %0d block %0d", expected_layer, expected_block);
+            $finish;
+          end
+          block_done <= 1'b1;
+          @(negedge clk);
+          block_done <= 1'b0;
         end
-        if (layer_id !== expected_layer[LAYER_ID_W-1:0]) begin
-          $error("layer_controller expected layer_id %0d, got %0d", expected_layer, layer_id);
-          $finish;
-        end
-        if (weight_layer_sel !== layer_id || kv_layer_sel !== layer_id) begin
-          $error("layer selectors expected to match layer_id %0d", layer_id);
-          $finish;
-        end
-        layer_step_done <= 1'b1;
-        @(negedge clk);
-        layer_step_done <= 1'b0;
       end
     end
   endtask
@@ -174,7 +195,7 @@ module tb_prefill_decode_controller;
     token_id          = '0;
     error_valid       = 1'b0;
     error_code        = ERROR_NONE;
-    layer_step_done   = 1'b0;
+    block_done        = 1'b0;
 
     repeat (4) @(negedge clk);
     rst_n = 1'b1;

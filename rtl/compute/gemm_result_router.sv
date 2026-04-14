@@ -20,6 +20,29 @@ module gemm_result_router (
 );
 
   act_bus_t requantized_bus;
+  act_bus_t quant_bus_d;
+  acc_bus_t score_bus_d;
+  acc_bus_t lmhead_bus_d;
+
+  function automatic block_id_e block_from_mode(
+    input gemm_mode_e gemm_mode
+  );
+    begin
+      unique case (gemm_mode)
+        GEMM_SCORE:        block_from_mode = BLOCK_SCORE;
+        GEMM_LM_HEAD:      block_from_mode = BLOCK_LM_HEAD;
+        GEMM_Q:            block_from_mode = BLOCK_Q;
+        GEMM_K:            block_from_mode = BLOCK_K;
+        GEMM_V:            block_from_mode = BLOCK_V;
+        GEMM_WEIGHTED_SUM: block_from_mode = BLOCK_WEIGHTED_SUM;
+        GEMM_O:            block_from_mode = BLOCK_O;
+        GEMM_GATE:         block_from_mode = BLOCK_GATE;
+        GEMM_UP:           block_from_mode = BLOCK_UP;
+        GEMM_DOWN:         block_from_mode = BLOCK_DOWN;
+        default:           block_from_mode = BLOCK_NONE;
+      endcase
+    end
+  endfunction
 
   function automatic logic mode_routes_to_quant(
     input gemm_mode_e gemm_mode
@@ -46,9 +69,21 @@ module gemm_result_router (
     .act_o(requantized_bus)
   );
 
-  assign quant_o  = requantized_bus;
-  assign score_o  = acc_i;
-  assign lmhead_o = acc_i;
+  assign quant_o  = quant_bus_d;
+  assign score_o  = score_bus_d;
+  assign lmhead_o = lmhead_bus_d;
+
+  always_comb begin
+    quant_bus_d               = requantized_bus;
+    quant_bus_d.tag.block_id  = block_from_mode(gemm_mode_i);
+    quant_bus_d.tag.gemm_mode = gemm_mode_i;
+    score_bus_d              = acc_i;
+    score_bus_d.tag.block_id = block_from_mode(GEMM_SCORE);
+    score_bus_d.tag.gemm_mode = GEMM_SCORE;
+    lmhead_bus_d               = acc_i;
+    lmhead_bus_d.tag.block_id  = block_from_mode(GEMM_LM_HEAD);
+    lmhead_bus_d.tag.gemm_mode = GEMM_LM_HEAD;
+  end
 
   always_comb begin
     quant_valid_o  = 1'b0;

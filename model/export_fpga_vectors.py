@@ -8,6 +8,8 @@ The current implementation exports deterministic cases for:
 - Phase 3 arithmetic blocks
 - Phase 4 attention-path leaves
 - Phase 5 nonlinear kernels and wrappers
+- Phase 6 embedding / FFN / LM-head leaves
+- Phase 7 decoder-layer integration schedule fixtures
 
 Trace outputs are written under:
   sim/golden_traces/
@@ -33,6 +35,7 @@ PHASE3 = "phase3"
 PHASE4 = "phase4"
 PHASE5 = "phase5"
 PHASE6 = "phase6"
+PHASE7 = "phase7"
 
 M_TILE = 16
 N_TILE = 32
@@ -43,9 +46,14 @@ DMA_BEAT_BYTES = 32
 DMA_BEAT_W = DMA_BEAT_BYTES * 8
 Q16_16_FRAC_BITS = 16
 K_TILE = 64
+SCORE_Q_TILE = 16
 D_MODEL = 2048
+D_FF = 5632
 VOCAB_SIZE = 32000
 VOCAB_TILE = 128
+N_Q_HEADS = 32
+N_KV_HEADS = 4
+KV_GROUPS = 8
 HEAD_DIM = 64
 ROPE_CHUNK_TOKENS = 8
 ROPE_HALF_DIM = HEAD_DIM // 2
@@ -53,6 +61,41 @@ SCORE_K_TILE = 64
 SCORE_ROWS_PER_CHUNK = 8
 SCORE_CHUNK_ELEMS = SCORE_ROWS_PER_CHUNK * SCORE_K_TILE
 MASK_NEG_INF = np.int32(-1000000000)
+
+BLOCK_NONE = 0
+BLOCK_RMSNORM1 = 2
+BLOCK_Q = 3
+BLOCK_K = 4
+BLOCK_V = 5
+BLOCK_ROPE = 6
+BLOCK_KV_CACHE_WRITE = 7
+BLOCK_SCORE = 8
+BLOCK_CAUSAL_MASK = 9
+BLOCK_SOFTMAX = 10
+BLOCK_WEIGHTED_SUM = 11
+BLOCK_O = 12
+BLOCK_RESIDUAL1 = 13
+BLOCK_REQUANTIZE = 14
+BLOCK_RMSNORM2 = 15
+BLOCK_GATE = 16
+BLOCK_UP = 17
+BLOCK_SILU = 18
+BLOCK_GLU_MUL = 19
+BLOCK_DOWN = 20
+BLOCK_RESIDUAL2 = 21
+BLOCK_LM_HEAD = 23
+
+GEMM_NONE = 0
+GEMM_Q = 1
+GEMM_K = 2
+GEMM_V = 3
+GEMM_SCORE = 4
+GEMM_WEIGHTED_SUM = 5
+GEMM_O = 6
+GEMM_GATE = 7
+GEMM_UP = 8
+GEMM_DOWN = 9
+GEMM_LM_HEAD = 10
 
 DEFAULT_PREFILL_TOKEN_IDS = ",".join(str(i) for i in range(1, 17))
 DEFAULT_DECODE_TOKEN_IDS = "1"
@@ -2223,6 +2266,267 @@ def export_phase6_cases(
     return manifest_path
 
 
+def phase7_gemm_mode_from_block(block_id: int) -> int:
+    if block_id == BLOCK_Q:
+        return GEMM_Q
+    if block_id == BLOCK_K:
+        return GEMM_K
+    if block_id == BLOCK_V:
+        return GEMM_V
+    if block_id == BLOCK_SCORE:
+        return GEMM_SCORE
+    if block_id == BLOCK_WEIGHTED_SUM:
+        return GEMM_WEIGHTED_SUM
+    if block_id == BLOCK_O:
+        return GEMM_O
+    if block_id == BLOCK_GATE:
+        return GEMM_GATE
+    if block_id == BLOCK_UP:
+        return GEMM_UP
+    if block_id == BLOCK_DOWN:
+        return GEMM_DOWN
+    if block_id == BLOCK_LM_HEAD:
+        return GEMM_LM_HEAD
+    return GEMM_NONE
+
+
+def phase7_gemm_step_count(block_id: int, seq_count: int, kv_token_count: int) -> int:
+    if block_id in (BLOCK_Q, BLOCK_O):
+        return ceil_div(seq_count, M_TILE) * ceil_div(D_MODEL, N_TILE) * ceil_div(D_MODEL, K_TILE)
+    if block_id in (BLOCK_K, BLOCK_V):
+        return ceil_div(seq_count, M_TILE) * ceil_div(N_KV_HEADS * HEAD_DIM, N_TILE) * ceil_div(D_MODEL, K_TILE)
+    if block_id == BLOCK_SCORE:
+        return ceil_div(seq_count, SCORE_Q_TILE) * ceil_div(kv_token_count, SCORE_K_TILE) * ceil_div(HEAD_DIM, K_TILE)
+    if block_id == BLOCK_WEIGHTED_SUM:
+        return ceil_div(seq_count, M_TILE) * ceil_div(HEAD_DIM, N_TILE) * ceil_div(kv_token_count, K_TILE)
+    if block_id in (BLOCK_GATE, BLOCK_UP):
+        return ceil_div(seq_count, M_TILE) * ceil_div(D_FF, N_TILE) * ceil_div(D_MODEL, K_TILE)
+    if block_id == BLOCK_DOWN:
+        return ceil_div(seq_count, M_TILE) * ceil_div(D_MODEL, N_TILE) * ceil_div(D_FF, K_TILE)
+    if block_id == BLOCK_LM_HEAD:
+        return ceil_div(seq_count, M_TILE) * ceil_div(VOCAB_TILE, N_TILE) * ceil_div(D_MODEL, K_TILE)
+    return 0
+
+
+def build_phase7_block_schedule(seq_count: int, kv_token_count: int) -> dict[str, np.ndarray]:
+    block_ids: list[int] = [
+        BLOCK_RMSNORM1,
+        BLOCK_Q,
+        BLOCK_K,
+        BLOCK_V,
+        BLOCK_ROPE,
+        BLOCK_KV_CACHE_WRITE,
+    ]
+    q_heads: list[int] = [0] * len(block_ids)
+    kv_heads: list[int] = [0] * len(block_ids)
+    gemm_modes: list[int] = [phase7_gemm_mode_from_block(block_id) for block_id in block_ids]
+    step_counts: list[int] = [phase7_gemm_step_count(block_id, seq_count, kv_token_count) for block_id in block_ids]
+
+    for q_head_id in range(N_Q_HEADS):
+        kv_head_id = q_head_id // KV_GROUPS
+        for block_id in (BLOCK_SCORE, BLOCK_CAUSAL_MASK, BLOCK_SOFTMAX, BLOCK_WEIGHTED_SUM):
+            block_ids.append(block_id)
+            q_heads.append(q_head_id)
+            kv_heads.append(kv_head_id)
+            gemm_modes.append(phase7_gemm_mode_from_block(block_id))
+            step_counts.append(phase7_gemm_step_count(block_id, seq_count, kv_token_count))
+
+    tail_blocks = [
+        BLOCK_O,
+        BLOCK_RESIDUAL1,
+        BLOCK_REQUANTIZE,
+        BLOCK_RMSNORM2,
+        BLOCK_GATE,
+        BLOCK_UP,
+        BLOCK_SILU,
+        BLOCK_GLU_MUL,
+        BLOCK_REQUANTIZE,
+        BLOCK_DOWN,
+        BLOCK_RESIDUAL2,
+        BLOCK_REQUANTIZE,
+    ]
+    for block_id in tail_blocks:
+        block_ids.append(block_id)
+        q_heads.append(0)
+        kv_heads.append(0)
+        gemm_modes.append(phase7_gemm_mode_from_block(block_id))
+        step_counts.append(phase7_gemm_step_count(block_id, seq_count, kv_token_count))
+
+    return {
+        "block_ids": np.asarray(block_ids, dtype=np.uint32),
+        "q_heads": np.asarray(q_heads, dtype=np.uint32),
+        "kv_heads": np.asarray(kv_heads, dtype=np.uint32),
+        "gemm_modes": np.asarray(gemm_modes, dtype=np.uint32),
+        "gemm_step_counts": np.asarray(step_counts, dtype=np.uint32),
+    }
+
+
+def build_phase7_layer_case(
+    *,
+    runtime_mode: str,
+    token_ids: list[int],
+    target_layer: int,
+    weights: ref.TinyLlamaWeights,
+    output_root: Path,
+    manifest_entries: list[dict[str, Any]],
+) -> None:
+    cos_local, sin_local = ref.build_rope_cache(
+        seq_len=len(token_ids),
+        head_dim=weights.cfg["head_dim"],
+        rope_theta=weights.cfg["rope_theta"],
+    )
+    layer_input = collect_layer_input(
+        weights=weights,
+        token_ids=token_ids,
+        target_layer=target_layer,
+        cos=cos_local,
+        sin=sin_local,
+    )
+    _, debug = bridge.mixed_precision_decoder_layer(
+        layer_input,
+        weights.layer(target_layer),
+        weights.cfg,
+        cos_local,
+        sin_local,
+        capture_arrays=True,
+    )
+
+    if runtime_mode == "prefill":
+        seq_count = int(layer_input.shape[0])
+        kv_token_count = seq_count
+    else:
+        seq_count = 1
+        kv_token_count = len(token_ids)
+
+    schedule = build_phase7_block_schedule(seq_count, kv_token_count)
+    block_count = int(schedule["block_ids"].shape[0])
+
+    case_id = f"{PHASE7}_{runtime_mode}_layer{target_layer}_schedule"
+    case_path = output_root / PHASE7 / f"{case_id}.npz"
+    ensure_dir(case_path.parent)
+
+    np.savez(
+        case_path,
+        seq_count=np.asarray([seq_count], dtype=np.uint32),
+        kv_token_count=np.asarray([kv_token_count], dtype=np.uint32),
+        block_count=np.asarray([block_count], dtype=np.uint32),
+        layer_input_shape=np.asarray(layer_input.shape, dtype=np.uint32),
+        attn_input_shape=np.asarray(debug["attn_input_fp"].shape, dtype=np.uint32),
+        layer_out_shape=np.asarray(debug["layer_out_fp"].shape, dtype=np.uint32),
+        **schedule,
+    )
+
+    rtl_root = output_root / PHASE7 / "rtl"
+    fixture_base = rtl_root / case_id
+    write_hex_memh(
+        fixture_base.with_suffix(".meta.memh"),
+        np.asarray([seq_count, kv_token_count, block_count], dtype=np.uint32),
+        bits=32,
+        signed=False,
+    )
+    write_hex_memh(
+        fixture_base.with_suffix(".block_ids.memh"),
+        schedule["block_ids"],
+        bits=32,
+        signed=False,
+    )
+    write_hex_memh(
+        fixture_base.with_suffix(".q_heads.memh"),
+        schedule["q_heads"],
+        bits=32,
+        signed=False,
+    )
+    write_hex_memh(
+        fixture_base.with_suffix(".kv_heads.memh"),
+        schedule["kv_heads"],
+        bits=32,
+        signed=False,
+    )
+    write_hex_memh(
+        fixture_base.with_suffix(".gemm_modes.memh"),
+        schedule["gemm_modes"],
+        bits=32,
+        signed=False,
+    )
+    write_hex_memh(
+        fixture_base.with_suffix(".gemm_steps.memh"),
+        schedule["gemm_step_counts"],
+        bits=32,
+        signed=False,
+    )
+
+    manifest_entries.append(
+        {
+            "case_id": case_id,
+            "phase": PHASE7,
+            "block": "decoder_layer_schedule",
+            "path": str(case_path.as_posix()),
+            "runtime_mode": runtime_mode,
+            "layer_id": target_layer,
+            "seq_count": seq_count,
+            "kv_token_count": kv_token_count,
+            "block_count": block_count,
+            "rtl_fixture_base": str(fixture_base.as_posix()),
+        }
+    )
+
+
+def export_phase7_cases(
+    *,
+    weights_path: str,
+    layer: int,
+    prefill_token_ids: list[int],
+    decode_context_token_ids: list[int],
+    output_dir: str,
+    source_root: Path,
+) -> Path:
+    output_root = Path(output_dir)
+    ensure_dir(output_root / PHASE7)
+
+    weights = ref.load_weights(weights_path, compute_dtype=np.float32, cache_arrays=False)
+    if layer < 0 or layer >= weights.cfg["num_hidden_layers"]:
+        raise ValueError(
+            f"--layer must be in [0, {weights.cfg['num_hidden_layers'] - 1}]"
+        )
+
+    manifest_entries: list[dict[str, Any]] = []
+
+    build_phase7_layer_case(
+        runtime_mode="prefill",
+        token_ids=prefill_token_ids,
+        target_layer=layer,
+        weights=weights,
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+    build_phase7_layer_case(
+        runtime_mode="decode",
+        token_ids=decode_context_token_ids,
+        target_layer=layer,
+        weights=weights,
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+
+    manifest = {
+        "trace_format_version": 1,
+        "phase": PHASE7,
+        "model_id": weights.cfg["model_id"],
+        "weights_path": weights_path,
+        "layer": layer,
+        "prefill_token_ids": prefill_token_ids,
+        "decode_context_token_ids": decode_context_token_ids,
+        "source_root": str(source_root.as_posix()),
+        "cases": manifest_entries,
+    }
+
+    manifest_path = output_root / "manifest.json"
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+        handle.write("\n")
+    return manifest_path
+
+
 def export_phase3_for_tokens(
     *,
     runtime_mode: str,
@@ -2349,7 +2653,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--phase",
-        choices=[PHASE3, PHASE4, PHASE5, PHASE6],
+        choices=[PHASE3, PHASE4, PHASE5, PHASE6, PHASE7],
         default=PHASE3,
         help="Trace-export phase.",
     )
@@ -2383,7 +2687,7 @@ def main() -> None:
 
     prefill_token_ids = parse_token_ids(args.prefill_token_ids)
     decode_token_ids_arg = args.decode_token_ids
-    if (args.phase in (PHASE4, PHASE5, PHASE6)) and (decode_token_ids_arg == DEFAULT_DECODE_TOKEN_IDS):
+    if (args.phase in (PHASE4, PHASE5, PHASE6, PHASE7)) and (decode_token_ids_arg == DEFAULT_DECODE_TOKEN_IDS):
         decode_token_ids_arg = DEFAULT_PHASE4_DECODE_CONTEXT_TOKEN_IDS
     decode_token_ids = parse_token_ids(decode_token_ids_arg)
 
@@ -2413,8 +2717,17 @@ def main() -> None:
             output_dir=args.output_dir,
             source_root=Path(__file__).resolve().parent.parent,
         )
-    else:
+    elif args.phase == PHASE6:
         manifest_path = export_phase6_cases(
+            weights_path=args.weights,
+            layer=args.layer,
+            prefill_token_ids=prefill_token_ids,
+            decode_context_token_ids=decode_token_ids,
+            output_dir=args.output_dir,
+            source_root=Path(__file__).resolve().parent.parent,
+        )
+    else:
+        manifest_path = export_phase7_cases(
             weights_path=args.weights,
             layer=args.layer,
             prefill_token_ids=prefill_token_ids,
