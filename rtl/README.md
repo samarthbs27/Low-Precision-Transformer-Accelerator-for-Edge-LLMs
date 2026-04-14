@@ -94,6 +94,16 @@ These production attention-path files now also exist under `rtl/compute/`.
 | `compute/gqa_router.sv` | Grouped-query attention routing leaf that validates `q_head -> kv_head` mapping and rewrites K/V tags for score vs weighted-sum use. | Run `rtl/tb/tb_gqa_router.sv`. |
 | `compute/causal_mask_unit.sv` | Real pre-softmax score-mask leaf for one `8 x 64` score chunk using the frozen `MASK_NEG_INF` fill contract. | Run `rtl/tb/tb_causal_mask_unit.sv`, which consumes exported Phase 4 traces. |
 
+## Phase 5 Nonlinear Wrappers
+
+These production nonlinear-wrapper files now exist under `rtl/nonlinear/`.
+
+| File | What it is | Smoke test |
+|------|------------|------------|
+| `nonlinear/rmsnorm_wrapper.sv` | RTL wrapper that converts INT8 activation tiles plus FP16 gamma beats into the fixed-point `rmsnorm_core_hls` stream contract, then requantizes the normalized output tile back to INT8. | Regenerate the Phase 5 fixtures, then run `rtl/tb/tb_rmsnorm_wrapper.sv`. |
+| `nonlinear/softmax_wrapper.sv` | RTL wrapper that dequantizes masked INT32 score tiles into Q16.16 chunks for `softmax_core_hls`, then emits the fixed probability scale and INT8 probability tile. | Regenerate the Phase 5 fixtures, then run `rtl/tb/tb_softmax_wrapper.sv`. |
+| `nonlinear/silu_wrapper.sv` | RTL wrapper that dequantizes gate-projection INT8 tiles into Q16.16 chunks for `silu_core_hls`, then requantizes the SiLU output back to INT8. | Regenerate the Phase 5 fixtures, then run `rtl/tb/tb_silu_wrapper.sv`. |
+
 ## Synthesis Readiness
 
 The production RTL under `rtl/common/`, `rtl/control/`, and the later

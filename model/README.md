@@ -93,11 +93,18 @@ The currently implemented export scopes are:
   - prefill and decode RoPE traces
   - prefill and decode causal-mask traces
   - generated RoPE Q16.16 ROM memh files for the RTL rotary datapath
+- Phase 5:
+  - prefill and decode RMSNorm traces
+  - prefill and decode softmax traces
+  - prefill and decode SiLU traces
+  - packed `.memh` fixtures for the Phase 5 RTL nonlinear-wrapper benches
 
 It uses the fixed GEMM lane-packing contract from the hardware docs so the
 exported traces match the production RTL interpretation of one `M_TILE x N_TILE`
 output tile. For Phase 4, it also uses the frozen token-major head-slice
 packing for RoPE and the fixed `8 x 64` score-chunk packing for the mask path.
+For Phase 5, it also exports the wrapper-facing packed chunk layouts used by
+the RMSNorm, softmax, and SiLU verification benches.
 
 ## TinyLlama Configuration Used By The Scripts
 

@@ -31,6 +31,9 @@ This folder contains production TinyLlama RTL smoke tests for the new `rtl/commo
 | `tb_rope_unit.sv` | Directed identity check plus exported Phase 4 TinyLlama trace replay for the RoPE rotary datapath. | Run the `tb_rope_unit` command below. |
 | `tb_gqa_router.sv` | Directed grouped-query routing smoke test for K-path, V-path, KV-head validation, and select-conflict handling. | Run the `tb_gqa_router` command below. |
 | `tb_causal_mask_unit.sv` | Directed mask check plus exported Phase 4 prefill/decode trace replay for the pre-softmax causal-mask leaf. | Run the `tb_causal_mask_unit` command below. |
+| `tb_rmsnorm_wrapper.sv` | Exported Phase 5 trace-backed smoke test for the RTL wrapper around the fixed-point RMSNorm HLS core, including gamma-beat capture, scale emission, and quantized output verification. | Run the `tb_rmsnorm_wrapper` command below. |
+| `tb_softmax_wrapper.sv` | Exported Phase 5 trace-backed smoke test for the RTL wrapper around the fixed-point softmax HLS core, including masked-score dequantization, probability-scale emission, and INT8 probability output verification. | Run the `tb_softmax_wrapper` command below. |
+| `tb_silu_wrapper.sv` | Exported Phase 5 trace-backed smoke test for the RTL wrapper around the fixed-point SiLU HLS core, including input dequantization, output requantization, and scale emission. | Run the `tb_silu_wrapper` command below. |
 
 ## Smoke Tests
 
@@ -482,4 +485,79 @@ Expected pass string:
 
 ```text
 PASS: tb_causal_mask_unit
+```
+
+### `tb_rmsnorm_wrapper.sv`
+
+Before running this bench, regenerate the Phase 5 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase5 --layer 0 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_rmsnorm_wrapper.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/nonlinear/rmsnorm_wrapper.sv `
+  rtl/tb/tb_rmsnorm_wrapper.sv
+vvp sim/tb_rmsnorm_wrapper.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_rmsnorm_wrapper
+```
+
+### `tb_softmax_wrapper.sv`
+
+Before running this bench, regenerate the Phase 5 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase5 --layer 0 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_softmax_wrapper.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/nonlinear/softmax_wrapper.sv `
+  rtl/tb/tb_softmax_wrapper.sv
+vvp sim/tb_softmax_wrapper.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_softmax_wrapper
+```
+
+### `tb_silu_wrapper.sv`
+
+Before running this bench, regenerate the Phase 5 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase5 --layer 0 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_silu_wrapper.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/nonlinear/silu_wrapper.sv `
+  rtl/tb/tb_silu_wrapper.sv
+vvp sim/tb_silu_wrapper.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_silu_wrapper
 ```

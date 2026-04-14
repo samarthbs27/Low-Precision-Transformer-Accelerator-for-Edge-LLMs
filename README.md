@@ -102,6 +102,14 @@ Project/
       gemm_operand_router.sv
       gemm_result_router.sv
       gemm_op_scheduler.sv
+      rope_lut_rom.sv
+      rope_unit.sv
+      gqa_router.sv
+      causal_mask_unit.sv
+    nonlinear/
+      rmsnorm_wrapper.sv
+      softmax_wrapper.sv
+      silu_wrapper.sv
     tb/
       README.md
       tb_stream_fifo.sv
@@ -126,6 +134,12 @@ Project/
       tb_gemm_operand_router.sv
       tb_gemm_result_router.sv
       tb_gemm_op_scheduler.sv
+      tb_rope_unit.sv
+      tb_gqa_router.sv
+      tb_causal_mask_unit.sv
+      tb_rmsnorm_wrapper.sv
+      tb_softmax_wrapper.sv
+      tb_silu_wrapper.sv
     control_fsm.sv
     top.sv
     mac_unit.sv
@@ -138,6 +152,20 @@ Project/
     common/
       fixed_types.hpp
       stream_utils.hpp
+      nonlinear_math.hpp
+      test_memh.hpp
+    rmsnorm/
+      rmsnorm_core_hls.hpp
+      rmsnorm_core_hls.cpp
+      tb_rmsnorm.cpp
+    softmax/
+      softmax_core_hls.hpp
+      softmax_core_hls.cpp
+      tb_softmax.cpp
+    silu/
+      silu_core_hls.hpp
+      silu_core_hls.cpp
+      tb_silu.cpp
   sim/
 ```
 
@@ -184,13 +212,18 @@ Project/
 - `rtl/memory/` now contains the hardened Phase 2 memory/DMA/buffer layer, including verified router, prompt I/O, generated-token I/O, multi-beat weight/KV readers, buffered KV writeback, scale-store, KV-address, and tile-buffer smoke tests.
 - `rtl/compute/` now contains the hardened Phase 3 shared GEMM compute layer, including the MAC leaf, accumulator bank, bank-scaled requantizer, shared engine, operand/result routers, and deterministic GEMM scheduler.
 - `rtl/compute/` now also contains the concrete Phase 4 attention-path leaves: the generated RoPE ROM, the real rotary datapath, the GQA router, and the pre-softmax causal-mask unit.
+- `hls/rmsnorm/`, `hls/softmax/`, `hls/silu/`, and `rtl/nonlinear/` now contain the hardened Phase 5 nonlinear implementation:
+  - fixed-point RMSNorm, softmax, and SiLU HLS kernels
+  - verified host-side C++ smoke tests
+  - verified RTL wrappers that consume exported Phase 5 trace fixtures
 - `model/export_fpga_vectors.py` now provides the canonical golden-trace export entry point for both:
   - Phase 3 arithmetic verification
   - Phase 4 RoPE and causal-mask verification
+  - Phase 5 nonlinear verification
   It writes canonical traces under `sim/golden_traces/`, emits packed `.memh` fixtures for the RTL benches, and regenerates the tracked RoPE ROM memh files under `rtl/compute/`.
 - `docs/` now describe the full TinyLlama prefill/decode accelerator that the project is building toward.
 
-The current RTL is still validation infrastructure; the finalized system architecture is documented in `docs/`.
+The repo now contains hardened production modules through Phase 5, but full decoder-layer and top-level runtime integration are still in progress. The finalized architectural contract continues to live under `docs/`.
 
 One practical note: the production RTL we are writing is intended to be
 synthesizable, but a passing Icarus smoke test is only the first gate. The

@@ -64,11 +64,20 @@ constexpr int kSeqTile      = 64;
 constexpr int kVocabTile    = 128;
 constexpr int kTileBanks    = 16;
 constexpr int kBankSlice8   = 32;
+constexpr int kChunkElems   = 32;
 constexpr int kDmaBeatBits  = 256;
 constexpr int kFixedTotalW  = 32;
 constexpr int kFixedIntW    = 16;
 constexpr int kFixedFracW   = kFixedTotalW - kFixedIntW;
 constexpr int kProbScale    = 127;
+constexpr int kRmsNormFeatureChunks = kDModel / kChunkElems;
+constexpr int kActTileChunks = kSeqTile * kDModel / kChunkElems;
+constexpr int kScoreRowsPerChunk = 8;
+constexpr int kScoreKTile = 64;
+constexpr int kSoftmaxChunkElems = 8 * 64;
+constexpr int kSoftmaxChunksPerTile = kSoftmaxChunkElems / kChunkElems;
+constexpr int kTileElems = 512;
+constexpr int kTileChunks = kTileElems / kChunkElems;
 
 using fixed_t       = ap_fixed<kFixedTotalW, kFixedIntW>;
 using accum_fixed_t = ap_fixed<48, 24>;
@@ -94,6 +103,8 @@ using hidden_vec32_t = vec_t<fixed_t, 32>;
 using hidden_vec64_t = vec_t<fixed_t, 64>;
 using int8_vec32_t   = vec_t<act_int8_t, 32>;
 using int8_vec64_t   = vec_t<act_int8_t, 64>;
+using scale_vec16_t  = vec_t<scale_int32_t, 16>;
+using prob_vec32_t   = vec_t<prob_fixed_t, 32>;
 
 }  // namespace hls_common
 }  // namespace tinyllama

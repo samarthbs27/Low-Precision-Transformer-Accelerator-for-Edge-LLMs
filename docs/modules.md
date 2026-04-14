@@ -844,8 +844,10 @@ hardware implementation.
 - Physical instances: 1
 - Purpose: Adapts the shared RTL datapath handshake to the HLS RMSNorm core.
 - Inputs / buses:
-  - INT8 or INT32 activation tile
-  - RMSNorm gamma vector
+  - INT8 activation-tile stream for one `M_TILE x N_TILE` feature slice
+  - input activation scale metadata
+  - output quantization scale metadata
+  - FP16 RMSNorm-gamma beat stream from `embedding_lmhead_dma_reader.sv`
   - mode tag
 - Outputs / buses:
   - normalized INT8 activation tile
@@ -860,11 +862,13 @@ hardware implementation.
 - Physical instances: 1 compiled IP core
 - Purpose: Computes RMSNorm with higher internal precision.
 - Inputs / buses:
-  - activation tile stream
-  - gamma vector stream
+  - activation chunk stream in `Q16.16`, fixed 32 elements per chunk
+  - gamma chunk stream in `Q16.16`, fixed 32 elements per chunk
+  - row count
+  - feature count
   - epsilon constant
 - Outputs / buses:
-  - normalized tile stream
+  - normalized chunk stream in `Q16.16`
 - Parallelism:
   - reduction tree over hidden dimension
   - vector-lane multiply pipeline.
@@ -876,10 +880,12 @@ hardware implementation.
 - Purpose: Adapts masked score tiles to the HLS softmax core.
 - Inputs / buses:
   - masked score tile
+  - input score scale metadata
   - tile shape
   - mode
 - Outputs / buses:
   - INT8 probability tile to weighted-sum path
+  - probability scale metadata, fixed to `1/127`
 - Parallelism:
   - one score-row tile at a time; pipelined handshake.
 
@@ -889,10 +895,11 @@ hardware implementation.
 - Physical instances: 1 compiled IP core
 - Purpose: Computes stable softmax over attention-score rows.
 - Inputs / buses:
-  - masked score tile
-  - row length
+  - masked score chunk stream in `Q16.16`, fixed 32 elements per chunk
+  - row count
+  - key-column count
 - Outputs / buses:
-  - normalized probability tile
+  - normalized probability chunk stream in `Q16.16`
 - Parallelism:
   - reduction for max
   - reduction for exp sum
@@ -905,8 +912,11 @@ hardware implementation.
 - Purpose: Adapts the gate-projection output stream to the HLS SiLU core.
 - Inputs / buses:
   - gate vector tile
+  - input activation scale metadata
+  - output quantization scale metadata
 - Outputs / buses:
   - INT8 SiLU-transformed gate vector
+  - output scale metadata
 - Parallelism:
   - one vector tile at a time; pipelined handshake.
 
@@ -916,9 +926,10 @@ hardware implementation.
 - Physical instances: 1 compiled IP core
 - Purpose: Computes SiLU for the gate branch of SwiGLU.
 - Inputs / buses:
-  - gate vector tile
+  - gate chunk stream in `Q16.16`, fixed 32 elements per chunk
+  - active element count
 - Outputs / buses:
-  - SiLU(gate) vector tile
+  - SiLU(gate) chunk stream in `Q16.16`
 - Parallelism:
   - elementwise pipelined activation evaluation across the active tile.
 
@@ -1061,7 +1072,9 @@ These notes affect the design immediately because they determine:
   no separate top-level width-adapter block.
 - Burst policy is fixed as:
   - bulk weights / KV / LM-head tiles: 16-beat bursts
-  - scales / gamma / metadata: 4-beat bursts
+  - scale metadata: 4-beat bursts
+  - RMSNorm gamma vectors: streamed FP16 beats and repacked into 32-element
+    `Q16.16` chunks on the normalization path
   - prompt tokens / status / debug headers: 1-beat bursts
 - Outstanding AXI transactions are fixed as:
   - up to 16 reads in flight per HBM pseudo-channel group
@@ -1205,16 +1218,21 @@ These notes affect the design immediately because they determine:
 - HLS wrappers perform all format conversion between quantized RTL streams and
   fixed-point HLS streams.
 - `rmsnorm_wrapper.sv` converts incoming INT8/INT32 tiles to `Q16.16`, invokes
-  the HLS core, and emits INT8 tiles plus scale metadata for downstream stages.
+  the HLS core, and emits INT8 tiles plus output scale metadata for downstream
+  stages. It consumes both the input activation scale and the selected output
+  quantization scale.
 - `rope_unit.sv` uses `Q16.16` internally for rotation math and emits INT8 Q/K
   tiles for the score GEMM path.
 - RoPE preserves the existing Q or K activation scale, so the same static
   activation scale applies before and after rotation.
 - `softmax_wrapper.sv` converts masked score tiles to `Q16.16`, invokes the HLS
   softmax core, and emits nonnegative INT8-compatible probability bytes in the
-  range `[0, 127]` using fixed probability scale `1/127`.
+  range `[0, 127]` using the supplied score-input scale and fixed probability
+  scale `1/127`.
 - `silu_wrapper.sv` converts gate tiles to `Q16.16`, invokes the HLS SiLU core,
-  and emits INT8 gate activations for `elementwise_mul.sv`.
+  and emits INT8 gate activations plus output scale metadata for
+  `elementwise_mul.sv`. It consumes both the input activation scale and the
+  selected output quantization scale.
 - `elementwise_mul.sv` performs `INT8 x INT8 -> INT32`.
 - `requantize_unit.sv` is always used after `elementwise_mul.sv` before
   `GEMM_DOWN`.

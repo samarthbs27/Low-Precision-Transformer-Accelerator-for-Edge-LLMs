@@ -289,8 +289,8 @@ For RTL, the preferred pattern is:
 - derive a small text, `.memh`, or include-format fixture only for the selected case
 - keep the derived fixture under `sim/golden_traces/`
 
-The current Phase 3 implementation uses packed `.memh` fixtures for RTL
-consumption.
+The current Phase 3 to Phase 5 implementation uses packed `.memh` fixtures for
+RTL consumption.
 
 This keeps the Python export path authoritative while avoiding heavy file
 parsing logic inside RTL testbenches.
@@ -339,16 +339,33 @@ Expected first-pass command shape:
 python model/export_fpga_vectors.py --phase phase4 --output-dir sim/golden_traces
 ```
 
-Current implemented Phase 4 export scope:
+Current implemented export scope:
 
-- one prefill RoPE case
-- one decode RoPE case
-- one prefill causal-mask case
-- one decode causal-mask case
-- generated packed `.memh` fixtures for the Phase 4 RTL testbenches
-- generated RoPE Q16.16 ROM contents under:
-  - `rtl/compute/rope_cos_rom.memh`
-  - `rtl/compute/rope_sin_rom.memh`
+- Phase 3:
+  - prefill and decode GEMM cases for layer 0
+  - prefill and decode requantization cases for layer 0
+  - generated packed `.memh` fixtures for:
+    - `tb_shared_gemm_engine.sv`
+    - `tb_requantize_unit.sv`
+- Phase 4:
+  - one prefill RoPE case
+  - one decode RoPE case
+  - one prefill causal-mask case
+  - one decode causal-mask case
+  - generated packed `.memh` fixtures for:
+    - `tb_rope_unit.sv`
+    - `tb_causal_mask_unit.sv`
+  - generated RoPE Q16.16 ROM contents under:
+    - `rtl/compute/rope_cos_rom.memh`
+    - `rtl/compute/rope_sin_rom.memh`
+- Phase 5:
+  - prefill and decode RMSNorm cases
+  - prefill and decode softmax cases
+  - prefill and decode SiLU cases
+  - generated packed `.memh` fixtures for:
+    - `tb_rmsnorm_wrapper.sv`
+    - `tb_softmax_wrapper.sv`
+    - `tb_silu_wrapper.sv`
 
 Expected later command shape:
 
