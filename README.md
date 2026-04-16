@@ -268,9 +268,25 @@ Project/
   - top-level AXI-Lite launch plus fake shell-DMA host-I/O smoke
 - `model/export_fpga_vectors.py` now also exports Phase 8 runtime fixtures
   under `sim/golden_traces/phase8/rtl/`.
+- `rtl/top/tinyllama_u55c_shell_wrapper.sv` now provides the first Phase 9
+  platform-facing wrapper step around the runtime core:
+  - same external normalized shell DMA boundary as Phase 8
+  - elastic read buffering at the shell seam
+  - coupled write-request buffering that preserves the router write contract
+- `rtl/tb/tb_kernel_top_acceptance.sv` and `rtl/tb/tb_shell_wrapper_smoke.sv`
+  now provide the first Phase 9 acceptance gates:
+  - top-level abort/relaunch/status acceptance against exported Phase 9
+    expectations
+  - wrapper smoke under shell-side backpressure
+- `model/export_fpga_vectors.py` now also exports Phase 9 runtime-acceptance
+  fixtures under `sim/golden_traces/phase9/rtl/`.
 - `docs/` now describe the full TinyLlama prefill/decode accelerator that the project is building toward.
 
-The repo now contains hardened production modules through Phase 8 runtime-core integration. The next milestone is Phase 9 runtime acceptance and platform-facing closure: debug/runtime acceptance tightening, broader trace-backed top-level checks, and the eventual wrapper from the normalized shell DMA boundary to the real U55C platform interface.
+The repo now contains hardened production modules through the first concrete
+Phase 9 runtime-acceptance and shell-wrapper step. The next milestone is
+platform closure beyond the normalized shell DMA seam: vendor synthesis
+bring-up and the eventual raw `m_axi_pc00..pc31` platform binding around the
+verified runtime core and shell wrapper.
 
 One practical note: the production RTL we are writing is intended to be
 synthesizable, but a passing Icarus smoke test is only the first gate. The

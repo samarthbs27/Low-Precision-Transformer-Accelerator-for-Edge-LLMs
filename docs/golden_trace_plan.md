@@ -457,7 +457,12 @@ The project should use the following gates:
   and one top-level AXI-Lite plus host-I/O smoke driven by the same exported
   fixture set
 - Phase 9:
-  debug capture and top-level smoke must line up with exported expected values
+  runtime acceptance and shell-wrapper smoke must line up with exported
+  expected values, including:
+  - the clean terminal status word for the nominal prefill+decode runtime case
+  - the host-abort terminal status word for an in-flight abort case
+  - the same prompt-token, command-block, and generated-count expectations used
+    by the top-level runtime-core smoke
 
 ---
 

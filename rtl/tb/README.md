@@ -44,6 +44,8 @@ This folder contains production TinyLlama RTL smoke tests for the new `rtl/commo
 | `tb_decoder_layer_smoke.sv` | Exported Phase 7 trace-backed smoke test for one concrete decoder-layer pass, including block order, head-loop sequencing, block-driven GEMM tile counts, and operand/result routing checks. | Run the `tb_decoder_layer_smoke` command below. |
 | `tb_prefill_decode_smoke.sv` | Exported Phase 8 trace-backed runtime-control smoke for prompt prefill plus a few decode steps, including expected generated-token count, layer-pass count, and final stop reason. | Run the `tb_prefill_decode_smoke` command below. |
 | `tb_kernel_top_smoke.sv` | Exported Phase 8 top-level smoke for AXI-Lite launch, host command fetch, prompt reads, generated-token writes, final status writeback, and interrupt behavior. | Run the `tb_kernel_top_smoke` command below. |
+| `tb_kernel_top_acceptance.sv` | Exported Phase 9 top-level acceptance smoke for host-abort during `RUN_LAYERS`, relaunch, sticky-status clear, and integrated host-visible status verification. | Run the `tb_kernel_top_acceptance` command below. |
+| `tb_shell_wrapper_smoke.sv` | Exported Phase 9 wrapper smoke for the buffered shell seam under staggered shell-side read/write backpressure. | Run the `tb_shell_wrapper_smoke` command below. |
 
 ## Smoke Tests
 
@@ -821,4 +823,77 @@ Expected pass string:
 
 ```text
 PASS: tb_kernel_top_smoke
+```
+
+### `tb_kernel_top_acceptance.sv`
+
+Before running this bench, regenerate the Phase 9 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase9 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_kernel_top_acceptance.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/common/stream_fifo.sv `
+  rtl/common/skid_buffer.sv `
+  rtl/control/axi_lite_ctrl_slave.sv `
+  rtl/control/kernel_reg_file.sv `
+  rtl/control/host_cmd_status_mgr.sv `
+  rtl/control/prefill_decode_controller.sv `
+  rtl/control/layer_controller.sv `
+  rtl/control/stop_condition_unit.sv `
+  rtl/memory/hbm_port_router.sv `
+  rtl/memory/prompt_token_reader.sv `
+  rtl/memory/generated_token_writer.sv `
+  rtl/top/tinyllama_u55c_kernel_top.sv `
+  rtl/tb/tb_kernel_top_acceptance.sv
+vvp sim/tb_kernel_top_acceptance.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_kernel_top_acceptance
+```
+
+### `tb_shell_wrapper_smoke.sv`
+
+Before running this bench, regenerate the Phase 9 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase9 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_shell_wrapper_smoke.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/common/stream_fifo.sv `
+  rtl/common/skid_buffer.sv `
+  rtl/control/axi_lite_ctrl_slave.sv `
+  rtl/control/kernel_reg_file.sv `
+  rtl/control/host_cmd_status_mgr.sv `
+  rtl/control/prefill_decode_controller.sv `
+  rtl/control/layer_controller.sv `
+  rtl/control/stop_condition_unit.sv `
+  rtl/memory/hbm_port_router.sv `
+  rtl/memory/prompt_token_reader.sv `
+  rtl/memory/generated_token_writer.sv `
+  rtl/top/tinyllama_u55c_kernel_top.sv `
+  rtl/top/tinyllama_u55c_shell_wrapper.sv `
+  rtl/tb/tb_shell_wrapper_smoke.sv
+vvp sim/tb_shell_wrapper_smoke.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_shell_wrapper_smoke
 ```

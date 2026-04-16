@@ -69,7 +69,9 @@ Design documentation for the TinyLlama U55C FPGA inference accelerator.
 - Control split: host launches and reads back results; FPGA executes embedding lookup, 22-layer inference, KV-cache management, final RMSNorm, LM head, and greedy argmax
 - Quantization: INT8 GEMMs with INT32 accumulation; RMSNorm, RoPE, softmax, and final RMSNorm stay higher precision
 - Memory model: U55C HBM stores weights, KV cache, and debug buffers; BRAM/URAM hold active tiles and partial sums
-- Current verified implementation frontier: Phases 0 through 5, including the nonlinear HLS kernels and RTL wrappers
+- Current verified implementation frontier: Phases 0 through 9, including
+  runtime acceptance and the first shell-facing wrapper around the normalized
+  DMA boundary
 
 ---
 

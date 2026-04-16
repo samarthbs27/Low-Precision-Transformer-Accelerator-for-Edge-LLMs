@@ -141,6 +141,17 @@ decoder-layer engine.
 | `tb/tb_prefill_decode_smoke.sv` | Exported Phase 8 trace-backed runtime-control smoke for prefill plus a few decode steps using the real TinyLlama reference to generate expected token IDs and runtime counts. | Regenerate the Phase 8 fixtures, then run `rtl/tb/tb_prefill_decode_smoke.sv`. |
 | `tb/tb_kernel_top_smoke.sv` | Exported Phase 8 top-level smoke for AXI-Lite launch, PC30 command fetch, prompt read beats, generated-token writes, final status payload, and interrupt observation against a fake shell DMA model. | Regenerate the Phase 8 fixtures, then run `rtl/tb/tb_kernel_top_smoke.sv`. |
 
+## Phase 9 Runtime Acceptance And Shell Wrapper
+
+These Phase 9 files harden the runtime shell with broader acceptance coverage
+and the first platform-facing wrapper step around the normalized DMA boundary.
+
+| File | What it is | Smoke test |
+|------|------------|------------|
+| `top/tinyllama_u55c_shell_wrapper.sv` | First shell-facing wrapper around `tinyllama_u55c_kernel_top.sv` with elastic read buffering plus coupled write-request buffering at the normalized shell DMA seam. | Run `rtl/tb/tb_shell_wrapper_smoke.sv`. |
+| `tb/tb_kernel_top_acceptance.sv` | Exported Phase 9 acceptance bench for abort during `RUN_LAYERS`, relaunch, sticky-status clear, host-visible status words, and integrated command/prompt/writeback counts. | Regenerate the Phase 9 fixtures, then run `rtl/tb/tb_kernel_top_acceptance.sv`. |
+| `tb/tb_shell_wrapper_smoke.sv` | Exported Phase 9 wrapper smoke that runs the runtime case through `tinyllama_u55c_shell_wrapper.sv` under shell-side backpressure. | Regenerate the Phase 9 fixtures, then run `rtl/tb/tb_shell_wrapper_smoke.sv`. |
+
 ## Synthesis Readiness
 
 The production RTL under `rtl/common/`, `rtl/control/`, and the later

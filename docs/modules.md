@@ -254,6 +254,29 @@ hardware implementation.
   - structural only; all system-level parallelism is created by child modules
     and overlapped DMA/compute pipelines.
 
+#### M00a. `tinyllama_u55c_shell_wrapper.sv`
+
+- Language: SystemVerilog RTL
+- Physical instances: 1
+- Purpose: First platform-facing wrapper around the Phase 8 runtime core. It
+  keeps the normalized shell DMA boundary but inserts elastic buffering at the
+  shell seam so the runtime core is not exposed directly to shell timing.
+- Inputs / buses:
+  - `ap_clk`, `ap_rst_n`
+  - `s_axi_control`
+  - normalized shell DMA read/write ready and read-data return
+- Outputs / buses:
+  - `interrupt`
+  - host-visible status through `s_axi_control`
+  - buffered normalized shell DMA read/write descriptors and write payloads
+- Parallelism:
+  - no new arithmetic parallelism; this is a timing-isolation wrapper.
+- Microarchitecture note:
+  - read descriptors and read-data return beats are buffered independently
+  - write descriptors and write payloads are buffered as one coupled request so
+    the wrapper preserves the write-acceptance contract of
+    `hbm_port_router.sv`
+
 #### M01. `axi_lite_ctrl_slave.sv`
 
 - Language: SystemVerilog RTL

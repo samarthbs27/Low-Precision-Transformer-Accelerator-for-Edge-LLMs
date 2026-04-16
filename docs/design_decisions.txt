@@ -463,6 +463,21 @@ B11a. Phase 8 top-level runtime boundary
   The actual platform-facing AXI shell binding is treated as a wrapper concern
   around the normalized shell DMA boundary.
 
+B11b. Phase 9 shell-wrapper closure
+  The first platform-facing wrapper step is fixed to
+  `tinyllama_u55c_shell_wrapper.sv`.
+  It wraps `tinyllama_u55c_kernel_top.sv` and keeps the same external
+  normalized shell DMA boundary, but inserts elastic buffering at the shell
+  seam for FPGA timing isolation.
+  The shell-wrapper buffering rule is:
+    - read descriptors are buffered independently
+    - read-data return beats are buffered independently
+    - write descriptors and write payloads are buffered as one coupled request
+      because `hbm_port_router.sv` treats write acceptance as a single
+      descriptor-plus-data transaction
+  This is still not the final raw `m_axi_pc00..m_axi_pc31` platform binding;
+  it is the verified shell seam immediately outside the Phase 8 runtime core.
+
 B12. Verification policy and golden-trace usage
   Directed smoke tests remain mandatory for control, routing, DMA, and storage
   modules.

@@ -109,6 +109,7 @@ rtl/
     silu_wrapper.sv
   top/
     tinyllama_u55c_kernel_top.sv
+    tinyllama_u55c_shell_wrapper.sv
   tb/
     tb_stream_fifo.sv
     tb_descriptor_fifo.sv
@@ -124,6 +125,8 @@ rtl/
     tb_decoder_layer_smoke.sv
     tb_prefill_decode_smoke.sv
     tb_kernel_top_smoke.sv
+    tb_kernel_top_acceptance.sv
+    tb_shell_wrapper_smoke.sv
 hls/
   common/
     fixed_types.hpp
@@ -181,7 +184,7 @@ Required order for each major block:
 | 6 | Build FFN path, LM head, and token selection |
 | 7 | Integrate full decoder-layer engine |
 | 8 | Integrate prefill/decode runtime |
-| 9 | Add debug, golden-vector export, and top-level smoke tests |
+| 9 | Runtime acceptance, shell-wrapper closure, and platform-ready verification |
 
 ---
 
@@ -357,22 +360,23 @@ Exit criteria:
 | 8.4 | `rtl/control/prefill_decode_controller.sv` | RTL update | Promote from state stub to real runtime controller | host/status, layer controller, stop unit | command-aware prompt/decode sequencing | `rtl/tb/tb_prefill_decode_controller.sv` and `rtl/tb/tb_prefill_decode_smoke.sv` |
 | 8.5 | `rtl/control/host_cmd_status_mgr.sv` | RTL update | Promote from descriptor stub to real command/status path | router, FIFOs | launch-status plus terminal-status writeback | `rtl/tb/tb_host_cmd_status_mgr.sv` and `rtl/tb/tb_kernel_top_smoke.sv` |
 
-## Phase 9 - Verification Collateral And Golden Traces
+## Phase 9 - Runtime Acceptance And Platform-Facing Closure
 
 Exit criteria:
 
-- software can export deterministic traces for RTL/HLS tests
-- debug capture contract is testable
-- each major module has at least one directed test path
-- trace-backed acceptance follows `golden_trace_plan.md`
+- runtime acceptance includes abort/relaunch/status edge cases
+- the runtime core has a verified shell-facing wrapper around the normalized DMA
+  boundary
+- top-level Phase 8/9 smokes consume exported fixtures under `phase9/rtl/`
+- the next platform step is limited to vendor synthesis and eventual raw
+  `m_axi_pc00..m_axi_pc31` binding, not another user-RTL contract rewrite
 
 | Order | File | Type | Purpose | Depends on | First pass | First verification |
 |---|---|---|---|---|---|---|
-| 9.1 | `model/export_fpga_vectors.py` | Python support | Exports deterministic TinyLlama golden traces for GEMM, RMSNorm, softmax, RoPE, one decoder layer, LM-head, and runtime smoke cases | existing TinyLlama model scripts, `golden_trace_plan.md` | prompt-independent trace export script | run locally and inspect generated files under `sim/golden_traces/` |
-| 9.2 | `rtl/tb/tb_requantize_unit.sv` | TB | Directed arithmetic verification for requantization | requantize unit | compare against exported vectors | run local simulation |
-| 9.3 | `rtl/tb/tb_shared_gemm_engine.sv` | TB | Directed GEMM tile verification | GEMM core | compare against exported vectors | run local simulation |
-| 9.4 | `rtl/tb/tb_rope_unit.sv` | TB | Directed RoPE vector verification | rope unit | compare against exported vectors | run local simulation |
-| 9.5 | `rtl/tb/tb_causal_mask_unit.sv` | TB | Prefill and decode mask verification | mask unit | directed cases | run local simulation |
+| 9.1 | `model/export_fpga_vectors.py` | Python support | Exports Phase 9 runtime-acceptance fixtures, including expected terminal status words for clean completion and host-abort runs | existing TinyLlama model scripts, `golden_trace_plan.md` | extend Phase 8 runtime export with Phase 9 acceptance metadata | run locally and inspect generated files under `sim/golden_traces/phase9/` |
+| 9.2 | `rtl/top/tinyllama_u55c_shell_wrapper.sv` | RTL | First shell-facing wrapper around the runtime core with elastic buffering at the normalized DMA boundary | `tinyllama_u55c_kernel_top.sv`, `skid_buffer.sv`, `stream_fifo.sv` | buffer read channels independently and write requests as one coupled transaction | `rtl/tb/tb_shell_wrapper_smoke.sv` |
+| 9.3 | `rtl/tb/tb_kernel_top_acceptance.sv` | TB | Trace-backed top-level acceptance test for abort, relaunch, sticky-status clear, and host-visible terminal status | Phase 8 runtime core, Phase 9 fixtures | two-launch smoke: abort in `RUN_LAYERS`, then clean relaunch | run local simulation |
+| 9.4 | `rtl/tb/tb_shell_wrapper_smoke.sv` | TB | Trace-backed wrapper smoke with shell-side backpressure to verify the buffered seam | shell wrapper, Phase 9 fixtures | one nominal runtime case under staggered shell ready patterns | run local simulation |
 
 ---
 
@@ -390,7 +394,7 @@ This is the recommended implementation sequence in the actual coding sessions:
 8. Phase 6 embedding path, FFN leaf blocks, LM head, argmax, debug mux
 9. Phase 7 decoder-layer integration
 10. Phase 8 top-level runtime integration
-11. Phase 9 expanded golden-trace export and directed verification
+11. Phase 9 runtime acceptance and shell-wrapper closure
 
 Do not start the final top-level kernel file before Phases 1-3 compile cleanly.
 

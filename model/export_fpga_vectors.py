@@ -11,6 +11,7 @@ The current implementation exports deterministic cases for:
 - Phase 6 embedding / FFN / LM-head leaves
 - Phase 7 decoder-layer integration schedule fixtures
 - Phase 8 runtime prompt/decode integration fixtures
+- Phase 9 runtime acceptance fixtures
 
 Trace outputs are written under:
   sim/golden_traces/
@@ -38,6 +39,7 @@ PHASE5 = "phase5"
 PHASE6 = "phase6"
 PHASE7 = "phase7"
 PHASE8 = "phase8"
+PHASE9 = "phase9"
 
 M_TILE = 16
 N_TILE = 32
@@ -2543,16 +2545,14 @@ def export_phase7_cases(
     return manifest_path
 
 
-def build_phase8_runtime_case(
+def collect_runtime_trace_reference(
     *,
     prefill_token_ids: list[int],
     max_new_tokens: int,
     weights: ref.TinyLlamaWeights,
-    output_root: Path,
-    manifest_entries: list[dict[str, Any]],
-) -> None:
+) -> dict[str, Any]:
     if max_new_tokens <= 0:
-        raise ValueError("Phase 8 runtime trace requires max_new_tokens > 0")
+        raise ValueError("Runtime trace export requires max_new_tokens > 0")
 
     cos, sin = ref.build_rope_cache(
         seq_len=weights.cfg["max_position_embeddings"],
@@ -2583,6 +2583,11 @@ def build_phase8_runtime_case(
         | (1 << 3)
         | (STOP_REASON_MAX_TOKENS << STATUS_STOP_REASON_LSB)
     )
+    abort_status_word = (
+        (1 << 1)
+        | (1 << 3)
+        | (STOP_REASON_HOST_ABORT << STATUS_STOP_REASON_LSB)
+    )
 
     command_words = np.zeros(HOST_BLOCK_WORDS, dtype=np.uint32)
     command_words[HOST_CMD_WORD_PROMPT_BASE_LO] = np.uint32(int(prompt_base_addr) & 0xFFFFFFFF)
@@ -2591,29 +2596,65 @@ def build_phase8_runtime_case(
     command_words[HOST_CMD_WORD_GEN_BASE_HI] = np.uint32((int(generated_base_addr) >> 32) & 0xFFFFFFFF)
     command_words[HOST_CMD_WORD_GEN_CAPACITY] = np.uint32(generated_capacity)
 
+    return {
+        "prompt_token_ids": np.asarray(prefill_token_ids, dtype=np.uint32),
+        "generated_token_ids": np.asarray(generated_token_ids, dtype=np.uint32),
+        "command_words": command_words,
+        "prompt_count": prompt_count,
+        "max_new_tokens": max_new_tokens,
+        "eos_token_id": eos_token_id,
+        "generated_capacity": generated_capacity,
+        "cmd_base_addr": cmd_base_addr,
+        "status_base_addr": status_base_addr,
+        "prompt_base_addr": prompt_base_addr,
+        "generated_base_addr": generated_base_addr,
+        "expected_generated_count": generated_count,
+        "expected_last_token": generated_token_ids[-1],
+        "expected_stop_reason": STOP_REASON_MAX_TOKENS,
+        "expected_layer_passes": expected_layer_passes,
+        "expected_prompt_beats": expected_prompt_beats,
+        "expected_final_status_word": final_status_word,
+        "expected_abort_status_word": abort_status_word,
+    }
+
+
+def build_phase8_runtime_case(
+    *,
+    prefill_token_ids: list[int],
+    max_new_tokens: int,
+    weights: ref.TinyLlamaWeights,
+    output_root: Path,
+    manifest_entries: list[dict[str, Any]],
+) -> None:
+    runtime_ref = collect_runtime_trace_reference(
+        prefill_token_ids=prefill_token_ids,
+        max_new_tokens=max_new_tokens,
+        weights=weights,
+    )
+
     case_id = f"{PHASE8}_prefill_decode_runtime"
     case_path = output_root / PHASE8 / f"{case_id}.npz"
     ensure_dir(case_path.parent)
 
     np.savez(
         case_path,
-        prompt_token_ids=np.asarray(prefill_token_ids, dtype=np.uint32),
-        generated_token_ids=np.asarray(generated_token_ids, dtype=np.uint32),
-        command_words=command_words,
-        prompt_count=np.asarray([prompt_count], dtype=np.uint32),
-        max_new_tokens=np.asarray([max_new_tokens], dtype=np.uint32),
-        eos_token_id=np.asarray([eos_token_id], dtype=np.uint32),
-        generated_capacity=np.asarray([generated_capacity], dtype=np.uint32),
-        cmd_base_addr=np.asarray([cmd_base_addr], dtype=np.uint64),
-        status_base_addr=np.asarray([status_base_addr], dtype=np.uint64),
-        prompt_base_addr=np.asarray([prompt_base_addr], dtype=np.uint64),
-        generated_base_addr=np.asarray([generated_base_addr], dtype=np.uint64),
-        expected_generated_count=np.asarray([generated_count], dtype=np.uint32),
-        expected_last_token=np.asarray([generated_token_ids[-1]], dtype=np.uint32),
-        expected_stop_reason=np.asarray([STOP_REASON_MAX_TOKENS], dtype=np.uint32),
-        expected_layer_passes=np.asarray([expected_layer_passes], dtype=np.uint32),
-        expected_prompt_beats=np.asarray([expected_prompt_beats], dtype=np.uint32),
-        expected_final_status_word=np.asarray([final_status_word], dtype=np.uint32),
+        prompt_token_ids=runtime_ref["prompt_token_ids"],
+        generated_token_ids=runtime_ref["generated_token_ids"],
+        command_words=runtime_ref["command_words"],
+        prompt_count=np.asarray([runtime_ref["prompt_count"]], dtype=np.uint32),
+        max_new_tokens=np.asarray([runtime_ref["max_new_tokens"]], dtype=np.uint32),
+        eos_token_id=np.asarray([runtime_ref["eos_token_id"]], dtype=np.uint32),
+        generated_capacity=np.asarray([runtime_ref["generated_capacity"]], dtype=np.uint32),
+        cmd_base_addr=np.asarray([runtime_ref["cmd_base_addr"]], dtype=np.uint64),
+        status_base_addr=np.asarray([runtime_ref["status_base_addr"]], dtype=np.uint64),
+        prompt_base_addr=np.asarray([runtime_ref["prompt_base_addr"]], dtype=np.uint64),
+        generated_base_addr=np.asarray([runtime_ref["generated_base_addr"]], dtype=np.uint64),
+        expected_generated_count=np.asarray([runtime_ref["expected_generated_count"]], dtype=np.uint32),
+        expected_last_token=np.asarray([runtime_ref["expected_last_token"]], dtype=np.uint32),
+        expected_stop_reason=np.asarray([runtime_ref["expected_stop_reason"]], dtype=np.uint32),
+        expected_layer_passes=np.asarray([runtime_ref["expected_layer_passes"]], dtype=np.uint32),
+        expected_prompt_beats=np.asarray([runtime_ref["expected_prompt_beats"]], dtype=np.uint32),
+        expected_final_status_word=np.asarray([runtime_ref["expected_final_status_word"]], dtype=np.uint32),
     )
 
     rtl_root = output_root / PHASE8 / "rtl"
@@ -2622,18 +2663,18 @@ def build_phase8_runtime_case(
         fixture_base.with_suffix(".meta.memh"),
         np.asarray(
             [
-                int(cmd_base_addr) & 0xFFFFFFFF,
-                (int(cmd_base_addr) >> 32) & 0xFFFFFFFF,
-                int(status_base_addr) & 0xFFFFFFFF,
-                (int(status_base_addr) >> 32) & 0xFFFFFFFF,
-                prompt_count,
-                max_new_tokens,
-                eos_token_id,
-                generated_capacity,
-                expected_layer_passes,
-                expected_prompt_beats,
-                generated_count,
-                final_status_word,
+                int(runtime_ref["cmd_base_addr"]) & 0xFFFFFFFF,
+                (int(runtime_ref["cmd_base_addr"]) >> 32) & 0xFFFFFFFF,
+                int(runtime_ref["status_base_addr"]) & 0xFFFFFFFF,
+                (int(runtime_ref["status_base_addr"]) >> 32) & 0xFFFFFFFF,
+                runtime_ref["prompt_count"],
+                runtime_ref["max_new_tokens"],
+                runtime_ref["eos_token_id"],
+                runtime_ref["generated_capacity"],
+                runtime_ref["expected_layer_passes"],
+                runtime_ref["expected_prompt_beats"],
+                runtime_ref["expected_generated_count"],
+                runtime_ref["expected_final_status_word"],
             ],
             dtype=np.uint32,
         ),
@@ -2642,19 +2683,19 @@ def build_phase8_runtime_case(
     )
     write_hex_memh(
         fixture_base.with_suffix(".command_words.memh"),
-        command_words,
+        runtime_ref["command_words"],
         bits=32,
         signed=False,
     )
     write_hex_memh(
         fixture_base.with_suffix(".prompt_tokens.memh"),
-        np.asarray(prefill_token_ids, dtype=np.uint32),
+        runtime_ref["prompt_token_ids"],
         bits=32,
         signed=False,
     )
     write_hex_memh(
         fixture_base.with_suffix(".generated_tokens_expected.memh"),
-        np.asarray(generated_token_ids, dtype=np.uint32),
+        runtime_ref["generated_token_ids"],
         bits=32,
         signed=False,
     )
@@ -2665,9 +2706,9 @@ def build_phase8_runtime_case(
             "phase": PHASE8,
             "block": "prefill_decode_runtime",
             "path": str(case_path.as_posix()),
-            "prompt_count": prompt_count,
-            "max_new_tokens": max_new_tokens,
-            "generated_count": generated_count,
+            "prompt_count": runtime_ref["prompt_count"],
+            "max_new_tokens": runtime_ref["max_new_tokens"],
+            "generated_count": runtime_ref["expected_generated_count"],
             "expected_stop_reason": int(STOP_REASON_MAX_TOKENS),
             "rtl_fixture_base": str(fixture_base.as_posix()),
         }
@@ -2697,6 +2738,143 @@ def export_phase8_cases(
     manifest = {
         "trace_format_version": 1,
         "phase": PHASE8,
+        "model_id": weights.cfg["model_id"],
+        "weights_path": weights_path,
+        "prefill_token_ids": prefill_token_ids,
+        "source_root": str(source_root.as_posix()),
+        "cases": manifest_entries,
+    }
+
+    manifest_path = output_root / "manifest.json"
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+        handle.write("\n")
+    return manifest_path
+
+
+def build_phase9_runtime_acceptance_case(
+    *,
+    prefill_token_ids: list[int],
+    max_new_tokens: int,
+    weights: ref.TinyLlamaWeights,
+    output_root: Path,
+    manifest_entries: list[dict[str, Any]],
+) -> None:
+    runtime_ref = collect_runtime_trace_reference(
+        prefill_token_ids=prefill_token_ids,
+        max_new_tokens=max_new_tokens,
+        weights=weights,
+    )
+
+    case_id = f"{PHASE9}_runtime_acceptance"
+    case_path = output_root / PHASE9 / f"{case_id}.npz"
+    ensure_dir(case_path.parent)
+
+    np.savez(
+        case_path,
+        prompt_token_ids=runtime_ref["prompt_token_ids"],
+        generated_token_ids=runtime_ref["generated_token_ids"],
+        command_words=runtime_ref["command_words"],
+        prompt_count=np.asarray([runtime_ref["prompt_count"]], dtype=np.uint32),
+        max_new_tokens=np.asarray([runtime_ref["max_new_tokens"]], dtype=np.uint32),
+        eos_token_id=np.asarray([runtime_ref["eos_token_id"]], dtype=np.uint32),
+        generated_capacity=np.asarray([runtime_ref["generated_capacity"]], dtype=np.uint32),
+        cmd_base_addr=np.asarray([runtime_ref["cmd_base_addr"]], dtype=np.uint64),
+        status_base_addr=np.asarray([runtime_ref["status_base_addr"]], dtype=np.uint64),
+        prompt_base_addr=np.asarray([runtime_ref["prompt_base_addr"]], dtype=np.uint64),
+        generated_base_addr=np.asarray([runtime_ref["generated_base_addr"]], dtype=np.uint64),
+        expected_generated_count=np.asarray([runtime_ref["expected_generated_count"]], dtype=np.uint32),
+        expected_last_token=np.asarray([runtime_ref["expected_last_token"]], dtype=np.uint32),
+        expected_stop_reason=np.asarray([runtime_ref["expected_stop_reason"]], dtype=np.uint32),
+        expected_layer_passes=np.asarray([runtime_ref["expected_layer_passes"]], dtype=np.uint32),
+        expected_prompt_beats=np.asarray([runtime_ref["expected_prompt_beats"]], dtype=np.uint32),
+        expected_final_status_word=np.asarray([runtime_ref["expected_final_status_word"]], dtype=np.uint32),
+        expected_abort_status_word=np.asarray([runtime_ref["expected_abort_status_word"]], dtype=np.uint32),
+    )
+
+    rtl_root = output_root / PHASE9 / "rtl"
+    fixture_base = rtl_root / case_id
+    write_hex_memh(
+        fixture_base.with_suffix(".meta.memh"),
+        np.asarray(
+            [
+                int(runtime_ref["cmd_base_addr"]) & 0xFFFFFFFF,
+                (int(runtime_ref["cmd_base_addr"]) >> 32) & 0xFFFFFFFF,
+                int(runtime_ref["status_base_addr"]) & 0xFFFFFFFF,
+                (int(runtime_ref["status_base_addr"]) >> 32) & 0xFFFFFFFF,
+                runtime_ref["prompt_count"],
+                runtime_ref["max_new_tokens"],
+                runtime_ref["eos_token_id"],
+                runtime_ref["generated_capacity"],
+                runtime_ref["expected_layer_passes"],
+                runtime_ref["expected_prompt_beats"],
+                runtime_ref["expected_generated_count"],
+                runtime_ref["expected_final_status_word"],
+                runtime_ref["expected_abort_status_word"],
+            ],
+            dtype=np.uint32,
+        ),
+        bits=32,
+        signed=False,
+    )
+    write_hex_memh(
+        fixture_base.with_suffix(".command_words.memh"),
+        runtime_ref["command_words"],
+        bits=32,
+        signed=False,
+    )
+    write_hex_memh(
+        fixture_base.with_suffix(".prompt_tokens.memh"),
+        runtime_ref["prompt_token_ids"],
+        bits=32,
+        signed=False,
+    )
+    write_hex_memh(
+        fixture_base.with_suffix(".generated_tokens_expected.memh"),
+        runtime_ref["generated_token_ids"],
+        bits=32,
+        signed=False,
+    )
+
+    manifest_entries.append(
+        {
+            "case_id": case_id,
+            "phase": PHASE9,
+            "block": "runtime_acceptance",
+            "path": str(case_path.as_posix()),
+            "prompt_count": runtime_ref["prompt_count"],
+            "max_new_tokens": runtime_ref["max_new_tokens"],
+            "generated_count": runtime_ref["expected_generated_count"],
+            "expected_stop_reason": int(STOP_REASON_MAX_TOKENS),
+            "expected_abort_stop_reason": int(STOP_REASON_HOST_ABORT),
+            "rtl_fixture_base": str(fixture_base.as_posix()),
+        }
+    )
+
+
+def export_phase9_cases(
+    *,
+    weights_path: str,
+    prefill_token_ids: list[int],
+    output_dir: str,
+    source_root: Path,
+) -> Path:
+    output_root = Path(output_dir)
+    ensure_dir(output_root / PHASE9)
+
+    weights = ref.load_weights(weights_path, compute_dtype=np.float32, cache_arrays=False)
+    manifest_entries: list[dict[str, Any]] = []
+    build_phase9_runtime_acceptance_case(
+        prefill_token_ids=prefill_token_ids,
+        max_new_tokens=2,
+        weights=weights,
+        output_root=output_root,
+        manifest_entries=manifest_entries,
+    )
+
+    manifest = {
+        "trace_format_version": 1,
+        "phase": PHASE9,
         "model_id": weights.cfg["model_id"],
         "weights_path": weights_path,
         "prefill_token_ids": prefill_token_ids,
@@ -2837,7 +3015,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--phase",
-        choices=[PHASE3, PHASE4, PHASE5, PHASE6, PHASE7, PHASE8],
+        choices=[PHASE3, PHASE4, PHASE5, PHASE6, PHASE7, PHASE8, PHASE9],
         default=PHASE3,
         help="Trace-export phase.",
     )
@@ -2919,8 +3097,15 @@ def main() -> None:
             output_dir=args.output_dir,
             source_root=Path(__file__).resolve().parent.parent,
         )
-    else:
+    elif args.phase == PHASE8:
         manifest_path = export_phase8_cases(
+            weights_path=args.weights,
+            prefill_token_ids=prefill_token_ids,
+            output_dir=args.output_dir,
+            source_root=Path(__file__).resolve().parent.parent,
+        )
+    else:
+        manifest_path = export_phase9_cases(
             weights_path=args.weights,
             prefill_token_ids=prefill_token_ids,
             output_dir=args.output_dir,

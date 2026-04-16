@@ -98,6 +98,17 @@ The currently implemented export scopes are:
   - prefill and decode softmax traces
   - prefill and decode SiLU traces
   - packed `.memh` fixtures for the Phase 5 RTL nonlinear-wrapper benches
+- Phase 6:
+  - embedding lookup / quantizer traces
+  - residual-add, SwiGLU multiply, and argmax traces
+- Phase 7:
+  - decoder-layer schedule fixtures for prefill and decode
+- Phase 8:
+  - prefill+decode runtime fixtures for the controller-level and top-level
+    smokes
+- Phase 9:
+  - top-level runtime-acceptance fixtures, including clean-completion and
+    host-abort terminal status expectations
 
 It uses the fixed GEMM lane-packing contract from the hardware docs so the
 exported traces match the production RTL interpretation of one `M_TILE x N_TILE`
