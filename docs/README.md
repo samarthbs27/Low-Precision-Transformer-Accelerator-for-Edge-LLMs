@@ -38,7 +38,12 @@ Design documentation for the TinyLlama U55C FPGA inference accelerator.
    Design rationale for where the current architecture is using FPGA
    parallelism aggressively and where it is intentionally conservative.
 
-8. `theory.md`
+8. `u55c_bringup_checklist.md`
+   Practical teammate-facing bring-up guide for Linux, XRT/U55C platform
+   checks, the current Phase 9 smoke reruns, and the first concrete Vivado
+   synthesis pass on the runtime core plus shell wrapper.
+
+9. `theory.md`
    Mathematical background for the transformer blocks, INT8 quantization, and
    hardware mapping concepts.
 
@@ -52,6 +57,7 @@ Design documentation for the TinyLlama U55C FPGA inference accelerator.
 | `modules.md` | Physical module inventory for the FPGA implementation, including RTL/HLS split and interface plan |
 | `implementation_checklist.md` | File-by-file coding plan for the TinyLlama implementation, including dependencies and verification order |
 | `golden_trace_plan.md` | Real-model golden-trace export and verification policy |
+| `u55c_bringup_checklist.md` | Shareable Linux/Vivado/Vitis bring-up checklist for the current Phase 9 runtime core |
 | `block_diagram.drawio` | Editable system architecture diagram; source of truth for the visual dataflow |
 | `block_diagram.md` | System-level architecture explanation plus legacy GEMM-engine details |
 | `parallelism_tradeoffs.md` | Design-rationale note on FPGA parallelism choices and deliberate first-pass limits |

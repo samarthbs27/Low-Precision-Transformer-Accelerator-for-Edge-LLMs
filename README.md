@@ -55,6 +55,7 @@ Project/
     modules.md
     implementation_checklist.md
     golden_trace_plan.md
+    u55c_bringup_checklist.md
     parallelism_tradeoffs.md
     block_diagram.drawio
     block_diagram.md
@@ -203,6 +204,10 @@ Project/
 
 - [docs/golden_trace_plan.md](docs/golden_trace_plan.md)
   Real-model trace export and verification policy, including when trace-backed tests become mandatory.
+
+- [docs/u55c_bringup_checklist.md](docs/u55c_bringup_checklist.md)
+  Step-by-step Linux/Vivado/Vitis bring-up guide for the current Phase 9
+  runtime core, including the first concrete Vivado synthesis checklist.
 
 - [docs/parallelism_tradeoffs.md](docs/parallelism_tradeoffs.md)
   Design rationale for where the current architecture is using FPGA
