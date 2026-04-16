@@ -56,6 +56,7 @@ Project/
     implementation_checklist.md
     golden_trace_plan.md
     u55c_bringup_checklist.md
+    real_inference_closure_plan.md
     parallelism_tradeoffs.md
     block_diagram.drawio
     block_diagram.md
@@ -208,6 +209,10 @@ Project/
 - [docs/u55c_bringup_checklist.md](docs/u55c_bringup_checklist.md)
   Step-by-step Linux/Vivado/Vitis bring-up guide for the current Phase 9
   runtime core, including the first concrete Vivado synthesis checklist.
+
+- [docs/real_inference_closure_plan.md](docs/real_inference_closure_plan.md)
+  Concrete closure plan for replacing the current top-level runtime stubs with
+  a true TinyLlama token-generating inference path.
 
 - [docs/parallelism_tradeoffs.md](docs/parallelism_tradeoffs.md)
   Design rationale for where the current architecture is using FPGA

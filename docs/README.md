@@ -43,7 +43,12 @@ Design documentation for the TinyLlama U55C FPGA inference accelerator.
    checks, the current Phase 9 smoke reruns, and the first concrete Vivado
    synthesis pass on the runtime core plus shell wrapper.
 
-9. `theory.md`
+9. `real_inference_closure_plan.md`
+   Concrete integration plan for replacing the current top-level runtime stubs
+   with the true TinyLlama inference datapath through final RMSNorm, LM head,
+   and argmax.
+
+10. `theory.md`
    Mathematical background for the transformer blocks, INT8 quantization, and
    hardware mapping concepts.
 
@@ -58,6 +63,7 @@ Design documentation for the TinyLlama U55C FPGA inference accelerator.
 | `implementation_checklist.md` | File-by-file coding plan for the TinyLlama implementation, including dependencies and verification order |
 | `golden_trace_plan.md` | Real-model golden-trace export and verification policy |
 | `u55c_bringup_checklist.md` | Shareable Linux/Vivado/Vitis bring-up checklist for the current Phase 9 runtime core |
+| `real_inference_closure_plan.md` | Concrete plan to close the remaining gap from runtime harness to true token-generating TinyLlama inference |
 | `block_diagram.drawio` | Editable system architecture diagram; source of truth for the visual dataflow |
 | `block_diagram.md` | System-level architecture explanation plus legacy GEMM-engine details |
 | `parallelism_tradeoffs.md` | Design-rationale note on FPGA parallelism choices and deliberate first-pass limits |
