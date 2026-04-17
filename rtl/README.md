@@ -137,7 +137,8 @@ decoder-layer engine.
 
 | File | What it is | Smoke test |
 |------|------------|------------|
-| `top/tinyllama_u55c_kernel_top.sv` | Phase 8 runtime-core top-level with AXI-Lite control, normalized shell DMA read/write boundary, PC30 command/status handling, prompt-token fetch, generated-token writeback, and structural prompt-prefill/decode control integration. | Run `rtl/tb/tb_kernel_top_smoke.sv`. |
+| `top/tinyllama_u55c_kernel_top.sv` | Runtime-core top-level with AXI-Lite control, normalized shell DMA read/write boundary, PC30 command/status handling, real prefill embedding ingress, generated-token writeback, and currently stubbed layer/LM/token closure beyond the embedding slice. | Run `rtl/tb/tb_kernel_top_smoke.sv`. |
+| `top/runtime_embedding_frontend.sv` | First real-inference closure helper that fetches embedding scale metadata, issues embedding-row DMA requests, assembles FP16 rows, and emits INT8 embedding activation tiles. | Run `rtl/tb/tb_runtime_embedding_frontend.sv`. |
 | `tb/tb_prefill_decode_smoke.sv` | Exported Phase 8 trace-backed runtime-control smoke for prefill plus a few decode steps using the real TinyLlama reference to generate expected token IDs and runtime counts. | Regenerate the Phase 8 fixtures, then run `rtl/tb/tb_prefill_decode_smoke.sv`. |
 | `tb/tb_kernel_top_smoke.sv` | Exported Phase 8 top-level smoke for AXI-Lite launch, PC30 command fetch, prompt read beats, generated-token writes, final status payload, and interrupt observation against a fake shell DMA model. | Regenerate the Phase 8 fixtures, then run `rtl/tb/tb_kernel_top_smoke.sv`. |
 

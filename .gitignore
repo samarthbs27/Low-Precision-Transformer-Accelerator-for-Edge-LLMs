@@ -26,3 +26,6 @@ __pycache__/
 
 # Large model weight archives (do not commit — download with --save-weights)
 model/data/
+
+# SOL
+SOL/

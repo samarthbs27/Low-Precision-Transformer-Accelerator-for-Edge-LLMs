@@ -36,6 +36,9 @@ module tinyllama_u55c_kernel_top (
   output logic [DMA_BEAT_W-1:0]       shell_wr_data_o
 );
 
+  localparam logic [HBM_ADDR_W-1:0] EMBEDDING_BASE_ADDR = 64'h0000_0000_1000_0000;
+  localparam logic [HBM_ADDR_W-1:0] EMBEDDING_SCALE_META_BASE_ADDR = 64'h0000_0000_0400_0000;
+
   logic                       reg_wr_en;
   logic [REG_WORD_ADDR_W-1:0] reg_wr_addr;
   logic [AXIL_DATA_W-1:0]     reg_wr_data;
@@ -100,7 +103,20 @@ module tinyllama_u55c_kernel_top (
   logic [DMA_BEAT_W-1:0]      prompt_rd_data;
   logic                       prompt_rd_data_ready;
   logic                       prompt_token_valid;
+  logic                       prompt_token_ready;
   token_bus_t                 prompt_token;
+  logic                       embed_rd_desc_valid;
+  logic                       embed_rd_desc_ready;
+  dma_desc_t                  embed_rd_desc;
+  logic                       embed_rd_data_valid;
+  logic [DMA_BEAT_W-1:0]      embed_rd_data;
+  logic                       embed_rd_data_ready;
+  logic                       embed_scale_valid;
+  scale_bus_t                 embed_scale_bus;
+  logic                       embed_act_valid;
+  act_bus_t                   embed_act_bus;
+  logic                       embed_busy;
+  logic                       embed_done_pulse;
 
   logic                       gen_writer_busy;
   logic                       gen_writer_token_ready;
@@ -256,7 +272,7 @@ module tinyllama_u55c_kernel_top (
     .prompt_token_count_i     (prompt_token_count),
     .max_new_tokens_i         (max_new_tokens),
     .command_info_valid_i     (command_info_valid),
-    .prompt_read_done_i       (prompt_done_pulse),
+    .prompt_read_done_i       (embed_done_pulse),
     .layer_pass_done_i        (layer_run_done),
     .lm_head_done_i           (sim_lm_head_done_q),
     .token_valid_i            (sim_token_valid_q),
@@ -311,8 +327,33 @@ module tinyllama_u55c_kernel_top (
     .rd_data_i               (prompt_rd_data),
     .rd_data_ready_o         (prompt_rd_data_ready),
     .token_valid_o           (prompt_token_valid),
-    .token_ready_i           (1'b1),
+    .token_ready_i           (prompt_token_ready),
     .token_o                 (prompt_token)
+  );
+
+  runtime_embedding_frontend u_runtime_embedding_frontend (
+    .ap_clk               (ap_clk),
+    .ap_rst_n             (ap_rst_n),
+    .launch_i             (start_pulse),
+    .embedding_base_addr_i(EMBEDDING_BASE_ADDR),
+    .scale_meta_base_addr_i(EMBEDDING_SCALE_META_BASE_ADDR),
+    .token_valid_i        (prompt_token_valid),
+    .token_ready_o        (prompt_token_ready),
+    .token_i              (prompt_token),
+    .rd_desc_valid_o      (embed_rd_desc_valid),
+    .rd_desc_ready_i      (embed_rd_desc_ready),
+    .rd_desc_o            (embed_rd_desc),
+    .rd_data_valid_i      (embed_rd_data_valid),
+    .rd_data_ready_o      (embed_rd_data_ready),
+    .rd_data_i            (embed_rd_data),
+    .scale_valid_o        (embed_scale_valid),
+    .scale_ready_i        (1'b1),
+    .scale_o              (embed_scale_bus),
+    .act_valid_o          (embed_act_valid),
+    .act_ready_i          (1'b1),
+    .act_o                (embed_act_bus),
+    .busy_o               (embed_busy),
+    .done_pulse_o         (embed_done_pulse)
   );
 
   generated_token_writer u_generated_token_writer (
@@ -376,12 +417,12 @@ module tinyllama_u55c_kernel_top (
     .weight_rd_data_valid_o     (),
     .weight_rd_data_ready_i     (1'b0),
     .weight_rd_data_o           (),
-    .embed_lm_rd_desc_valid_i   (1'b0),
-    .embed_lm_rd_desc_ready_o   (),
-    .embed_lm_rd_desc_i         (zero_desc),
-    .embed_lm_rd_data_valid_o   (),
-    .embed_lm_rd_data_ready_i   (1'b0),
-    .embed_lm_rd_data_o         (),
+    .embed_lm_rd_desc_valid_i   (embed_rd_desc_valid),
+    .embed_lm_rd_desc_ready_o   (embed_rd_desc_ready),
+    .embed_lm_rd_desc_i         (embed_rd_desc),
+    .embed_lm_rd_data_valid_o   (embed_rd_data_valid),
+    .embed_lm_rd_data_ready_i   (embed_rd_data_ready),
+    .embed_lm_rd_data_o         (embed_rd_data),
     .kv_rd_desc_valid_i         (1'b0),
     .kv_rd_desc_ready_o         (),
     .kv_rd_desc_i               (zero_desc),
@@ -444,7 +485,7 @@ module tinyllama_u55c_kernel_top (
 
     if (layer_busy) begin
       hw_current_block = layer_block_id;
-    end else if (prompt_busy) begin
+    end else if (embed_busy || prompt_busy) begin
       hw_current_block = BLOCK_EMBED;
     end else if (sim_lm_pending_q) begin
       hw_current_block = BLOCK_LM_HEAD;

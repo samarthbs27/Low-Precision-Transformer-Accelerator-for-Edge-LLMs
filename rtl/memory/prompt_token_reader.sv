@@ -53,7 +53,7 @@ module prompt_token_reader (
   assign rd_desc_o.byte_count     = DMA_BEAT_BYTES;
   assign rd_desc_o.layer_id       = '0;
   assign rd_desc_o.kv_head_id     = '0;
-  assign rd_desc_o.tile_id        = emitted_count_q[TILE_ID_W-1:0];
+  assign rd_desc_o.tile_id        = TILE_ID_W'(emitted_count_q);
 
   assign beat_token_count_now = (tokens_remaining_q > TOKENS_PER_DMA_BEAT) ?
                                 TOKENS_PER_DMA_BEAT[3:0] :
@@ -82,8 +82,8 @@ module prompt_token_reader (
     token_o.tag.layer_id       = '0;
     token_o.tag.block_id       = BLOCK_EMBED;
     token_o.tag.gemm_mode      = GEMM_NONE;
-    token_o.tag.tile_id        = emitted_count_q[TILE_ID_W-1:0];
-    token_o.tag.token_base     = emitted_count_q[POS_W-1:0];
+    token_o.tag.tile_id        = TILE_ID_W'(emitted_count_q);
+    token_o.tag.token_base     = POS_W'(emitted_count_q);
     token_o.tag.seq_count      = tokens_remaining_q;
     token_o.tag.q_head_id      = '0;
     token_o.tag.kv_head_id     = '0;

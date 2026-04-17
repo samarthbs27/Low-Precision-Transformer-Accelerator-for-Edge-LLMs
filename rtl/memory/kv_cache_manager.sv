@@ -60,7 +60,7 @@ module kv_cache_manager (
     read_desc_o.byte_count     = byte_count;
     read_desc_o.layer_id       = layer_id_i;
     read_desc_o.kv_head_id     = kv_head_id_i;
-    read_desc_o.tile_id        = token_base_i[TILE_ID_W-1:0];
+    read_desc_o.tile_id        = TILE_ID_W'(token_base_i);
 
     write_desc_o               = read_desc_o;
     write_desc_o.write_not_read = 1'b1;

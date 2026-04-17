@@ -207,8 +207,8 @@ hardware blocks that implement it.
 |---|---|
 | Host launch and status | `axi_lite_ctrl_slave.sv`, `kernel_reg_file.sv`, `host_cmd_status_mgr.sv` |
 | Prompt token fetch | `prompt_token_reader.sv`, `hbm_port_router.sv`, `tile_buffer_bank.sv` |
-| Embedding lookup | `embedding_lookup.sv`, `embedding_lmhead_dma_reader.sv`, `tile_buffer_bank.sv` |
-| Embedding output quantization | `embedding_quantizer.sv`, `requantize_unit.sv`, `scale_metadata_store.sv` |
+| Embedding lookup | `runtime_embedding_frontend.sv`, `embedding_lookup.sv`, `embedding_lmhead_dma_reader.sv`, `tile_buffer_bank.sv` |
+| Embedding output quantization | `runtime_embedding_frontend.sv`, `embedding_quantizer.sv`, `requantize_unit.sv`, `scale_metadata_store.sv` |
 | RMSNorm 1 / RMSNorm 2 / Final RMSNorm | `rmsnorm_wrapper.sv`, `rmsnorm_core_hls.cpp` |
 | Q / K / V / O projections | `gemm_op_scheduler.sv`, `gemm_operand_router.sv`, `shared_gemm_engine.sv`, `gemm_result_router.sv` |
 | RoPE | `rope_lut_rom.sv`, `rope_unit.sv` |
@@ -250,6 +250,15 @@ hardware implementation.
   - `interrupt`
   - host-visible status through `s_axi_control`
   - normalized shell DMA read/write descriptors and write payloads
+- Concrete contract:
+  - command beat fetch still comes from PC30 through `host_cmd_status_mgr.sv`
+  - prompt-token list fetch still comes from PC30 through `prompt_token_reader.sv`
+  - prefill launch is no longer treated as complete when prompt-token list
+    fetch alone finishes; the top-level now waits for completed embedding ingress
+    from `runtime_embedding_frontend.sv`
+  - the current top-level still uses deterministic layer/LM/token stubs after
+    embedding ingress, so this is the first real-inference closure slice rather
+    than full end-to-end inference
 - Parallelism:
   - structural only; all system-level parallelism is created by child modules
     and overlapped DMA/compute pipelines.
@@ -276,6 +285,33 @@ hardware implementation.
   - write descriptors and write payloads are buffered as one coupled request so
     the wrapper preserves the write-acceptance contract of
     `hbm_port_router.sv`
+
+#### M00b. `runtime_embedding_frontend.sv`
+
+- Language: SystemVerilog RTL
+- Physical instances: 1
+- Purpose: First post-Phase-9 real-inference closure helper. It composes
+  embedding-scale fetch, embedding-row DMA, row assembly, and embedding-output
+  quantization into one runtime slice.
+- Inputs / buses:
+  - `launch_i`
+  - token stream from `prompt_token_reader.sv` or a future decode-token mux
+  - normalized embed/meta read descriptor/data channel
+- Outputs / buses:
+  - `scale_bus` / `act_bus` embedding outputs for the future decoder datapath
+  - one `done_pulse` when the current embedding sequence finishes
+- Concrete contract:
+  - on each runtime launch it first fetches one `TENSOR_SCALE_META` vector
+  - after scale fetch completes it accepts token traffic and issues one
+    `TENSOR_EMBED` request per token
+  - current canonical normalized-shell base addresses are:
+    - embedding rows: `0x0000_0000_1000_0000`
+    - embedding-output scale metadata: `0x0000_0000_0400_0000`
+  - prompt-token backpressure is allowed so embedding ingress completion is
+    aligned with real row fetch + quantization, not just host-side token fetch
+- Parallelism:
+  - one scale fetch plus streamed row fetches, with `embedding_quantizer.sv`
+    emitting one full `M_TILE x N_TILE` activation batch at a time.
 
 #### M01. `axi_lite_ctrl_slave.sv`
 

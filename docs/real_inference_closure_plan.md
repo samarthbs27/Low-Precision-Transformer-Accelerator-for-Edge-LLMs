@@ -39,6 +39,13 @@ The current top-level still contains deterministic LM/token stub logic:
 So the current top-level is a **runtime harness**, not the final inference
 datapath.
 
+One important update: the first post-Phase-9 real-inference closure slice is
+now in place. The runtime core now includes
+[runtime_embedding_frontend.sv](../rtl/top/runtime_embedding_frontend.sv),
+which fetches embedding-output scale metadata, issues real embedding-row DMA
+requests, and emits real INT8 embedding tiles during prefill. The remaining gap
+is the integrated decoder/final-RMS/LM-head/argmax path.
+
 ---
 
 ## Design Target
@@ -189,15 +196,15 @@ simulation around synthetic token IDs.
 
 The safest order is:
 
-1. introduce a dedicated integrated decoder datapath module
-2. wire prompt/decode token ingress through embedding lookup + quantizer
-3. replace synthetic `block_done` with real decoder-block completion
-4. add final RMSNorm at the end of the 22-layer pass
-5. wire real LM-head control and logits flow
-6. wire real argmax reduction and token emission
-7. remove the synthetic LM/token stub logic from
+1. continue from the completed embedding-ingress slice by introducing a
+   dedicated integrated decoder datapath module
+2. replace synthetic `block_done` with real decoder-block completion
+3. add final RMSNorm at the end of the 22-layer pass
+4. wire real LM-head control and logits flow
+5. wire real argmax reduction and token emission
+6. remove the synthetic LM/token stub logic from
    [tinyllama_u55c_kernel_top.sv](../rtl/top/tinyllama_u55c_kernel_top.sv)
-8. add a true token-generating top-level testbench
+7. add a true token-generating top-level testbench
 
 This order keeps the control plane stable while we progressively replace the
 remaining synthetic datapath seams.

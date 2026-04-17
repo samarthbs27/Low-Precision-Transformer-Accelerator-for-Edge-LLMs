@@ -36,6 +36,7 @@ This folder contains production TinyLlama RTL smoke tests for the new `rtl/commo
 | `tb_silu_wrapper.sv` | Exported Phase 5 trace-backed smoke test for the RTL wrapper around the fixed-point SiLU HLS core, including input dequantization, output requantization, and scale emission. | Run the `tb_silu_wrapper` command below. |
 | `tb_embedding_lookup.sv` | Directed plus exported Phase 6 trace-backed smoke test for embedding-row DMA request generation and full-row FP16 assembly. | Run the `tb_embedding_lookup` command below. |
 | `tb_embedding_quantizer.sv` | Directed plus exported Phase 6 trace-backed smoke test for FP16 embedding-row batching, Q16.16 scale-based quantization, scale emission, and INT8 activation-tile output. | Run the `tb_embedding_quantizer` command below. |
+| `tb_runtime_embedding_frontend.sv` | Exported trace-backed integration smoke for the new runtime embedding frontend, including scale fetch, one real embedding-row DMA burst, and emitted INT8 tiles. | Run the `tb_runtime_embedding_frontend` command below. |
 | `tb_residual_add.sv` | Directed plus exported Phase 6 trace-backed smoke test for aligned residual1/residual2 INT32 accumulation and tag retiming. | Run the `tb_residual_add` command below. |
 | `tb_elementwise_mul.sv` | Directed plus exported Phase 6 trace-backed smoke test for the SwiGLU `SiLU(gate) * up` multiply leaf. | Run the `tb_elementwise_mul` command below. |
 | `tb_lm_head_controller.sv` | Directed controller smoke test for the outer LM-head vocab-tile loop and partial-logit retagging path. | Run the `tb_lm_head_controller` command below. |
@@ -43,7 +44,7 @@ This folder contains production TinyLlama RTL smoke tests for the new `rtl/commo
 | `tb_debug_capture_mux.sv` | Directed smoke test for layer/block filtering, lowest-index source priority, and drop-pulse behavior in the debug mux. | Run the `tb_debug_capture_mux` command below. |
 | `tb_decoder_layer_smoke.sv` | Exported Phase 7 trace-backed smoke test for one concrete decoder-layer pass, including block order, head-loop sequencing, block-driven GEMM tile counts, and operand/result routing checks. | Run the `tb_decoder_layer_smoke` command below. |
 | `tb_prefill_decode_smoke.sv` | Exported Phase 8 trace-backed runtime-control smoke for prompt prefill plus a few decode steps, including expected generated-token count, layer-pass count, and final stop reason. | Run the `tb_prefill_decode_smoke` command below. |
-| `tb_kernel_top_smoke.sv` | Exported Phase 8 top-level smoke for AXI-Lite launch, host command fetch, prompt reads, generated-token writes, final status writeback, and interrupt behavior. | Run the `tb_kernel_top_smoke` command below. |
+| `tb_kernel_top_smoke.sv` | Exported Phase 8 top-level smoke for AXI-Lite launch, host command fetch, prompt reads, real embedding/meta read bursts at the shell seam, generated-token writes, final status writeback, and interrupt behavior. | Run the `tb_kernel_top_smoke` command below. |
 | `tb_kernel_top_acceptance.sv` | Exported Phase 9 top-level acceptance smoke for host-abort during `RUN_LAYERS`, relaunch, sticky-status clear, and integrated host-visible status verification. | Run the `tb_kernel_top_acceptance` command below. |
 | `tb_shell_wrapper_smoke.sv` | Exported Phase 9 wrapper smoke for the buffered shell seam under staggered shell-side read/write backpressure. | Run the `tb_shell_wrapper_smoke` command below. |
 
@@ -653,6 +654,33 @@ Expected pass string:
 PASS: tb_embedding_quantizer
 ```
 
+### `tb_runtime_embedding_frontend.sv`
+
+Before running this bench, regenerate the Phase 6 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase6 --layer 0 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_runtime_embedding_frontend.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/memory/embedding_lmhead_dma_reader.sv `
+  rtl/compute/embedding_lookup.sv `
+  rtl/compute/embedding_quantizer.sv `
+  rtl/top/runtime_embedding_frontend.sv `
+  rtl/tb/tb_runtime_embedding_frontend.sv
+vvp sim/tb_runtime_embedding_frontend.vvp
+```
+
+Expected pass string:
+```text
+PASS: tb_runtime_embedding_frontend
+```
+
 ### `tb_residual_add.sv`
 
 Before running this bench, regenerate the Phase 6 fixtures:
@@ -812,8 +840,12 @@ iverilog -g2012 -o sim/tb_kernel_top_smoke.vvp `
   rtl/control/layer_controller.sv `
   rtl/control/stop_condition_unit.sv `
   rtl/memory/hbm_port_router.sv `
+  rtl/memory/embedding_lmhead_dma_reader.sv `
   rtl/memory/prompt_token_reader.sv `
   rtl/memory/generated_token_writer.sv `
+  rtl/compute/embedding_lookup.sv `
+  rtl/compute/embedding_quantizer.sv `
+  rtl/top/runtime_embedding_frontend.sv `
   rtl/top/tinyllama_u55c_kernel_top.sv `
   rtl/tb/tb_kernel_top_smoke.sv
 vvp sim/tb_kernel_top_smoke.vvp
@@ -848,8 +880,12 @@ iverilog -g2012 -o sim/tb_kernel_top_acceptance.vvp `
   rtl/control/layer_controller.sv `
   rtl/control/stop_condition_unit.sv `
   rtl/memory/hbm_port_router.sv `
+  rtl/memory/embedding_lmhead_dma_reader.sv `
   rtl/memory/prompt_token_reader.sv `
   rtl/memory/generated_token_writer.sv `
+  rtl/compute/embedding_lookup.sv `
+  rtl/compute/embedding_quantizer.sv `
+  rtl/top/runtime_embedding_frontend.sv `
   rtl/top/tinyllama_u55c_kernel_top.sv `
   rtl/tb/tb_kernel_top_acceptance.sv
 vvp sim/tb_kernel_top_acceptance.vvp
@@ -884,8 +920,12 @@ iverilog -g2012 -o sim/tb_shell_wrapper_smoke.vvp `
   rtl/control/layer_controller.sv `
   rtl/control/stop_condition_unit.sv `
   rtl/memory/hbm_port_router.sv `
+  rtl/memory/embedding_lmhead_dma_reader.sv `
   rtl/memory/prompt_token_reader.sv `
   rtl/memory/generated_token_writer.sv `
+  rtl/compute/embedding_lookup.sv `
+  rtl/compute/embedding_quantizer.sv `
+  rtl/top/runtime_embedding_frontend.sv `
   rtl/top/tinyllama_u55c_kernel_top.sv `
   rtl/top/tinyllama_u55c_shell_wrapper.sv `
   rtl/tb/tb_shell_wrapper_smoke.sv

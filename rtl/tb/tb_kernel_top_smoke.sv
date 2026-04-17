@@ -7,6 +7,14 @@ module tb_kernel_top_smoke;
 
   localparam int unsigned TRACE_META_WORDS = 12;
   localparam int unsigned TRACE_PROMPT_MAX = 16;
+  localparam int unsigned SCALE_BEATS = (SCALE_VECTOR_ELEMS * SCALE_W) / DMA_BEAT_W;
+
+  typedef enum logic [1:0] {
+    RD_NONE   = 2'd0,
+    RD_CMD    = 2'd1,
+    RD_PROMPT = 2'd2,
+    RD_EMBED  = 2'd3
+  } rd_kind_e;
 
   logic [31:0] trace_meta [0:TRACE_META_WORDS-1];
   logic [31:0] trace_command_words [0:HOST_BLOCK_WORDS-1];
@@ -39,8 +47,11 @@ module tb_kernel_top_smoke;
   logic                  shell_rd_data_valid;
   logic                  shell_rd_data_ready;
   logic [DMA_BEAT_W-1:0] shell_rd_data;
-  logic                  shell_rd_pending_q;
-  logic [DMA_BEAT_W-1:0] shell_rd_pending_data_q;
+  logic                  shell_rd_burst_active_q;
+  rd_kind_e              shell_rd_kind_q;
+  tensor_id_e            shell_rd_tensor_id_q;
+  logic [15:0]           shell_rd_beat_idx_q;
+  logic [15:0]           shell_rd_beats_total_q;
   logic                  shell_wr_desc_valid;
   logic                  shell_wr_desc_ready;
   dma_desc_t             shell_wr_desc;
@@ -50,6 +61,8 @@ module tb_kernel_top_smoke;
 
   int unsigned           command_read_count;
   int unsigned           prompt_read_count;
+  int unsigned           embed_read_count;
+  int unsigned           scale_read_count;
   int unsigned           launch_status_write_count;
   int unsigned           final_status_write_count;
   int unsigned           generated_write_count;
@@ -62,6 +75,17 @@ module tb_kernel_top_smoke;
       beat_value = '0;
       for (int word_idx = 0; word_idx < HOST_BLOCK_WORDS; word_idx++) begin
         beat_value[(word_idx*AXIL_DATA_W) +: AXIL_DATA_W] = trace_command_words[word_idx];
+      end
+      return beat_value;
+    end
+  endfunction
+
+  function automatic logic [DMA_BEAT_W-1:0] pack_unit_scale_beat;
+    logic [DMA_BEAT_W-1:0] beat_value;
+    begin
+      beat_value = '0;
+      for (int lane = 0; lane < (DMA_BEAT_W / SCALE_W); lane++) begin
+        beat_value[(lane * SCALE_W) +: SCALE_W] = 32'h0001_0000;
       end
       return beat_value;
     end
@@ -123,15 +147,18 @@ module tb_kernel_top_smoke;
   always #5 clk = ~clk;
 
   always_ff @(posedge clk) begin
-    logic [HBM_ADDR_W-1:0] prompt_beat_addr;
-    int unsigned prompt_beat_idx;
     if (!rst_n) begin
-      shell_rd_pending_q      <= 1'b0;
-      shell_rd_pending_data_q <= '0;
+      shell_rd_burst_active_q <= 1'b0;
+      shell_rd_kind_q         <= RD_NONE;
+      shell_rd_tensor_id_q    <= TENSOR_NONE;
+      shell_rd_beat_idx_q     <= '0;
+      shell_rd_beats_total_q  <= '0;
       shell_rd_data_valid     <= 1'b0;
       shell_rd_data           <= '0;
       command_read_count      <= 0;
       prompt_read_count       <= 0;
+      embed_read_count        <= 0;
+      scale_read_count        <= 0;
       launch_status_write_count <= 0;
       final_status_write_count <= 0;
       generated_write_count   <= 0;
@@ -142,26 +169,59 @@ module tb_kernel_top_smoke;
         irq_seen <= 1'b1;
       end
 
-      if (shell_rd_pending_q) begin
+      if (shell_rd_burst_active_q && !shell_rd_data_valid) begin
         shell_rd_data_valid <= 1'b1;
-        shell_rd_data       <= shell_rd_pending_data_q;
-        if (shell_rd_data_valid && shell_rd_data_ready) begin
+        unique case (shell_rd_kind_q)
+          RD_CMD:    shell_rd_data <= pack_command_beat();
+          RD_PROMPT: shell_rd_data <= pack_prompt_beat(shell_rd_beat_idx_q, trace_meta[4]);
+          RD_EMBED:  shell_rd_data <= (shell_rd_tensor_id_q == TENSOR_SCALE_META) ? pack_unit_scale_beat() : '0;
+          default:   shell_rd_data <= '0;
+        endcase
+      end else if (shell_rd_data_valid && shell_rd_data_ready) begin
+        if (shell_rd_beat_idx_q + 1 >= shell_rd_beats_total_q) begin
           shell_rd_data_valid <= 1'b0;
-          shell_rd_pending_q  <= 1'b0;
+          shell_rd_burst_active_q <= 1'b0;
+          shell_rd_kind_q <= RD_NONE;
+          shell_rd_beat_idx_q <= '0;
+        end else begin
+          shell_rd_beat_idx_q <= shell_rd_beat_idx_q + 1'b1;
+          unique case (shell_rd_kind_q)
+            RD_CMD:    shell_rd_data <= pack_command_beat();
+            RD_PROMPT: shell_rd_data <= pack_prompt_beat(shell_rd_beat_idx_q + 1'b1, trace_meta[4]);
+            RD_EMBED:  shell_rd_data <= (shell_rd_tensor_id_q == TENSOR_SCALE_META) ? pack_unit_scale_beat() : '0;
+            default:   shell_rd_data <= '0;
+          endcase
         end
       end
 
       if (shell_rd_desc_valid && shell_rd_desc_ready) begin
         if (shell_rd_desc.addr == {trace_meta[1], trace_meta[0]}) begin
-          shell_rd_pending_data_q <= pack_command_beat();
           command_read_count <= command_read_count + 1;
-        end else begin
-          prompt_beat_addr = shell_rd_desc.addr - {trace_command_words[HOST_CMD_WORD_PROMPT_BASE_HI], trace_command_words[HOST_CMD_WORD_PROMPT_BASE_LO]};
-          prompt_beat_idx = prompt_beat_addr / DMA_BEAT_BYTES;
-          shell_rd_pending_data_q <= pack_prompt_beat(prompt_beat_idx, trace_meta[4]);
+          shell_rd_kind_q <= RD_CMD;
+        end else if ((shell_rd_desc.region == REGION_HOST_IO) && (shell_rd_desc.tensor_id == TENSOR_NONE)) begin
           prompt_read_count <= prompt_read_count + 1;
+          shell_rd_kind_q <= RD_PROMPT;
+        end else if ((shell_rd_desc.region == REGION_EMBED_META) &&
+                     ((shell_rd_desc.tensor_id == TENSOR_EMBED) ||
+                      (shell_rd_desc.tensor_id == TENSOR_SCALE_META))) begin
+          if (shell_rd_desc.tensor_id == TENSOR_SCALE_META) begin
+            scale_read_count <= scale_read_count + 1;
+          end else begin
+            embed_read_count <= embed_read_count + 1;
+          end
+          shell_rd_kind_q <= RD_EMBED;
+        end else begin
+          $error("tb_kernel_top_smoke saw unexpected read descriptor tensor=%0d region=%0d addr=0x%0h",
+                 shell_rd_desc.tensor_id,
+                 shell_rd_desc.region,
+                 shell_rd_desc.addr);
+          $finish;
         end
-        shell_rd_pending_q <= 1'b1;
+        shell_rd_burst_active_q <= 1'b1;
+        shell_rd_tensor_id_q <= shell_rd_desc.tensor_id;
+        shell_rd_beat_idx_q <= '0;
+        shell_rd_beats_total_q <= (shell_rd_desc.byte_count + DMA_BEAT_BYTES - 1) / DMA_BEAT_BYTES;
+        shell_rd_data_valid <= 1'b0;
       end
 
       if (shell_wr_desc_valid && shell_wr_data_valid && shell_wr_desc_ready && shell_wr_data_ready) begin
@@ -339,6 +399,13 @@ module tb_kernel_top_smoke;
     end
     if (prompt_read_count != trace_meta[9]) begin
       $error("expected %0d prompt reads, got %0d", trace_meta[9], prompt_read_count);
+      $finish;
+    end
+    if (scale_read_count != 1 || embed_read_count != trace_meta[4]) begin
+      $error("expected one scale read and %0d embedding reads, got scale=%0d embed=%0d",
+             trace_meta[4],
+             scale_read_count,
+             embed_read_count);
       $finish;
     end
     if (generated_write_count != 2) begin

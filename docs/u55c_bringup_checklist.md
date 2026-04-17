@@ -294,9 +294,13 @@ rtl/control/prefill_decode_controller.sv
 rtl/control/layer_controller.sv
 rtl/control/stop_condition_unit.sv
 rtl/memory/hbm_port_router.sv
+rtl/memory/embedding_lmhead_dma_reader.sv
 rtl/memory/prompt_token_reader.sv
 rtl/memory/generated_token_writer.sv
+rtl/compute/embedding_lookup.sv
+rtl/compute/embedding_quantizer.sv
 rtl/top/tinyllama_u55c_kernel_top.sv
+rtl/top/runtime_embedding_frontend.sv
 rtl/top/tinyllama_u55c_shell_wrapper.sv
 ```
 
@@ -343,6 +347,7 @@ Treat Step 6 as a pass only if all of these are true:
 - top module is `tinyllama_u55c_shell_wrapper`
 - both `tinyllama_u55c_shell_wrapper` and `tinyllama_u55c_kernel_top` appear in
   the synthesized hierarchy
+- `runtime_embedding_frontend` appears beneath `tinyllama_u55c_kernel_top`
 - there are no fatal errors about:
   - unsupported SystemVerilog packages
   - packed-struct port handling
@@ -368,6 +373,16 @@ Write down:
 - whether synthesis passed
 - total LUT/FF/BRAM/URAM/DSP counts from the utilization report
 - the first 10-20 nontrivial warnings, if any
+
+Remember what this pass proves:
+
+- the current runtime core plus shell wrapper is synthesizable
+- the first real-inference closure slice, `runtime_embedding_frontend`, is in
+  the synth target
+
+It still does **not** prove the final full TinyLlama accelerator fits or meets
+timing, because the integrated decoder/LM/argmax top-level datapath is not
+fully wired yet.
 
 ### Optional Batch Flow
 

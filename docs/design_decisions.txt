@@ -478,6 +478,24 @@ B11b. Phase 9 shell-wrapper closure
   This is still not the final raw `m_axi_pc00..m_axi_pc31` platform binding;
   it is the verified shell seam immediately outside the Phase 8 runtime core.
 
+B11c. First real-inference closure slice
+  The first post-Phase-9 real-inference closure step is fixed to
+  `runtime_embedding_frontend.sv`.
+  It composes:
+    - `embedding_lmhead_dma_reader.sv`
+    - `embedding_lookup.sv`
+    - `embedding_quantizer.sv`
+  into one runtime slice that converts prompt-token stream traffic into real
+  INT8 embedding activation tiles at the top-level runtime boundary.
+  For the current normalized-shell runtime harness, the canonical base addresses
+  are frozen to:
+    - embedding rows: `0x0000_0000_1000_0000`
+    - embedding-output scale metadata: `0x0000_0000_0400_0000`
+  `tinyllama_u55c_kernel_top.sv` now launches this frontend on every runtime
+  launch and treats prefill ingress as complete only after the embedding
+  frontend finishes, not merely after the prompt-token list has been fetched
+  from PC30.
+
 B12. Verification policy and golden-trace usage
   Directed smoke tests remain mandatory for control, routing, DMA, and storage
   modules.

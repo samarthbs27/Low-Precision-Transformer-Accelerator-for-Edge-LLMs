@@ -109,6 +109,7 @@ rtl/
     silu_wrapper.sv
   top/
     tinyllama_u55c_kernel_top.sv
+    runtime_embedding_frontend.sv
     tinyllama_u55c_shell_wrapper.sv
   tb/
     tb_stream_fifo.sv
@@ -124,6 +125,7 @@ rtl/
     tb_argmax_reduction.sv
     tb_decoder_layer_smoke.sv
     tb_prefill_decode_smoke.sv
+    tb_runtime_embedding_frontend.sv
     tb_kernel_top_smoke.sv
     tb_kernel_top_acceptance.sv
     tb_shell_wrapper_smoke.sv
@@ -378,6 +380,23 @@ Exit criteria:
 | 9.3 | `rtl/tb/tb_kernel_top_acceptance.sv` | TB | Trace-backed top-level acceptance test for abort, relaunch, sticky-status clear, and host-visible terminal status | Phase 8 runtime core, Phase 9 fixtures | two-launch smoke: abort in `RUN_LAYERS`, then clean relaunch | run local simulation |
 | 9.4 | `rtl/tb/tb_shell_wrapper_smoke.sv` | TB | Trace-backed wrapper smoke with shell-side backpressure to verify the buffered seam | shell wrapper, Phase 9 fixtures | one nominal runtime case under staggered shell ready patterns | run local simulation |
 
+## Post-Phase-9 - Real Inference Closure
+
+Exit criteria for the first closure slice:
+
+- the top-level no longer treats prompt ingress as complete when PC30 token fetch
+  alone finishes
+- prompt-token stream traffic is converted into real embedding activation tiles
+  through existing embedding RTL blocks
+- the Phase 8/9 top-level runtime smokes continue to pass with real
+  `TENSOR_SCALE_META` and `TENSOR_EMBED` read bursts present on the shell seam
+
+| Order | File | Type | Purpose | Depends on | First pass | First verification |
+|---|---|---|---|---|---|---|
+| R1 | `rtl/top/runtime_embedding_frontend.sv` | RTL | First real-inference closure helper that composes scale fetch, embedding lookup, DMA reader, and embedding quantizer into one runtime slice | `embedding_lmhead_dma_reader.sv`, `embedding_lookup.sv`, `embedding_quantizer.sv` | launch-armed prefill embedding ingress with exported decode-case verification | `rtl/tb/tb_runtime_embedding_frontend.sv` |
+| R2 | `rtl/top/tinyllama_u55c_kernel_top.sv` | RTL update | Replace prefill “prompt tokens fetched” completion with real embedding-ingress completion and route real embedding/meta read traffic through the shell seam | `runtime_embedding_frontend.sv`, `hbm_port_router.sv`, Phase 8/9 runtime harness | prefill embedding ingress real; layer/LM/token path still stubbed | `rtl/tb/tb_kernel_top_smoke.sv`, `rtl/tb/tb_kernel_top_acceptance.sv`, `rtl/tb/tb_shell_wrapper_smoke.sv` |
+| R3 | `rtl/tb/tb_runtime_embedding_frontend.sv` | TB | Trace-backed integration smoke for scale fetch plus one real embedding-row-to-INT8 conversion path | Phase 6 embedding traces, `runtime_embedding_frontend.sv` | one decode row using real TinyLlama export data | run local simulation |
+
 ---
 
 ## 6. Build Order Summary
@@ -395,6 +414,7 @@ This is the recommended implementation sequence in the actual coding sessions:
 9. Phase 7 decoder-layer integration
 10. Phase 8 top-level runtime integration
 11. Phase 9 runtime acceptance and shell-wrapper closure
+12. Post-Phase-9 real inference closure, beginning with embedding ingress
 
 Do not start the final top-level kernel file before Phases 1-3 compile cleanly.
 

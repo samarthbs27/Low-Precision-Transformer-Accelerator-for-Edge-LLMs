@@ -41,7 +41,7 @@ module generated_token_writer (
   assign wr_desc_o.byte_count     = DMA_BEAT_BYTES;
   assign wr_desc_o.layer_id       = '0;
   assign wr_desc_o.kv_head_id     = '0;
-  assign wr_desc_o.tile_id        = write_index_q[TILE_ID_W-1:0];
+  assign wr_desc_o.tile_id        = TILE_ID_W'(write_index_q);
 
   always_comb begin
     wr_data_o              = '0;
