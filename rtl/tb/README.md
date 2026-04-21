@@ -1,6 +1,16 @@
 # RTL Testbenches
 
-This folder contains production TinyLlama RTL smoke tests for the new `rtl/common/` building blocks.
+This folder contains production TinyLlama RTL smoke and integration tests across
+the `rtl/common/`, `rtl/control/`, `rtl/memory/`, `rtl/compute/`,
+`rtl/nonlinear/`, and `rtl/top/` hierarchies.
+
+Current regression frontier:
+
+- the Phase 9 runtime-acceptance benches still pass
+- the first post-Phase-9 real-inference closure slice now also passes through
+  `tb_runtime_embedding_frontend.sv`
+- the hardened embedding quantizer microarchitecture remains covered by
+  `tb_embedding_quantizer.sv`
 
 ## Files
 
@@ -35,7 +45,7 @@ This folder contains production TinyLlama RTL smoke tests for the new `rtl/commo
 | `tb_softmax_wrapper.sv` | Exported Phase 5 trace-backed smoke test for the RTL wrapper around the fixed-point softmax HLS core, including masked-score dequantization, probability-scale emission, and INT8 probability output verification. | Run the `tb_softmax_wrapper` command below. |
 | `tb_silu_wrapper.sv` | Exported Phase 5 trace-backed smoke test for the RTL wrapper around the fixed-point SiLU HLS core, including input dequantization, output requantization, and scale emission. | Run the `tb_silu_wrapper` command below. |
 | `tb_embedding_lookup.sv` | Directed plus exported Phase 6 trace-backed smoke test for embedding-row DMA request generation and full-row FP16 assembly. | Run the `tb_embedding_lookup` command below. |
-| `tb_embedding_quantizer.sv` | Directed plus exported Phase 6 trace-backed smoke test for FP16 embedding-row batching, Q16.16 scale-based quantization, scale emission, and INT8 activation-tile output. | Run the `tb_embedding_quantizer` command below. |
+| `tb_embedding_quantizer.sv` | Directed plus exported Phase 6 trace-backed smoke test for the current ingest-time embedding quantizer: FP16 row capture, Q16.16 scale-based quantization over one `N_TILE = 32` slice per cycle, scale emission, buffered INT8 feature-tile storage, and 512-lane activation-tile output assembly. | Run the `tb_embedding_quantizer` command below. |
 | `tb_runtime_embedding_frontend.sv` | Exported trace-backed integration smoke for the new runtime embedding frontend, including scale fetch, one real embedding-row DMA burst, and emitted INT8 tiles. | Run the `tb_runtime_embedding_frontend` command below. |
 | `tb_residual_add.sv` | Directed plus exported Phase 6 trace-backed smoke test for aligned residual1/residual2 INT32 accumulation and tag retiming. | Run the `tb_residual_add` command below. |
 | `tb_elementwise_mul.sv` | Directed plus exported Phase 6 trace-backed smoke test for the SwiGLU `SiLU(gate) * up` multiply leaf. | Run the `tb_elementwise_mul` command below. |

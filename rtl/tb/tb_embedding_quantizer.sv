@@ -140,7 +140,7 @@ module tb_embedding_quantizer;
     int timeout_cycles;
     begin
       timeout_cycles = 0;
-      while ((captured_tile_count < FEATURE_TILE_COUNT) && (timeout_cycles < 512)) begin
+      while ((captured_tile_count < FEATURE_TILE_COUNT) && (timeout_cycles < 4096)) begin
         @(posedge clk);
         timeout_cycles++;
       end

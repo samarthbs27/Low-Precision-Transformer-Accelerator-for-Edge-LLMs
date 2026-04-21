@@ -24,25 +24,31 @@ module embedding_quantizer (
   localparam int unsigned EMBED_ELEM_W      = 16;
   localparam int unsigned EMBED_ROW_W       = D_MODEL * EMBED_ELEM_W;
   localparam int unsigned FEATURE_TILE_COUNT = D_MODEL / N_TILE;
+  localparam int unsigned QUANT_TILE_W      = N_TILE * ACT_W;
 
   typedef enum logic [1:0] {
     EQ_IDLE      = 2'd0,
-    EQ_COLLECT   = 2'd1,
+    EQ_QUANTIZE  = 2'd1,
     EQ_OUT_SCALE = 2'd2,
     EQ_OUT_ACT   = 2'd3
   } eq_state_e;
 
   eq_state_e                               state_q;
   logic                                    scale_captured_q;
-  scale_bus_t                              scale_q;
-  logic [(M_TILE * D_MODEL * EMBED_ELEM_W)-1:0] rows_flat_q;
+  logic [SCALE_VECTOR_ELEMS-1:0][SCALE_W-1:0] scale_data_q;
+  logic [EMBED_ROW_W-1:0]                  current_row_fp16_q;
+  logic [QUANT_TILE_W-1:0]                 quant_tile_storage_q [0:M_TILE-1][0:FEATURE_TILE_COUNT-1];
   logic [COUNT_W-1:0]                      batch_row_count_q;
   logic [POS_W-1:0]                        batch_token_base_q;
   logic                                    batch_last_q;
   logic [TILE_ID_W-1:0]                    feature_tile_idx_q;
+  logic [COUNT_W-1:0]                      quant_row_slot_q;
+  logic [TILE_ID_W-1:0]                    quant_feature_tile_idx_q;
+  logic                                    current_row_last_q;
   act_bus_t                                act_bus_d;
   scale_bus_t                              scale_bus_d;
-  wire signed [ACT_VECTOR_ELEMS-1:0][ACT_W-1:0] act_data_w;
+  logic [(ACT_VECTOR_ELEMS * ACT_W)-1:0]   act_data_flat_d;
+  wire signed [N_TILE-1:0][ACT_W-1:0]      quant_tile_data_w;
 
   function automatic logic signed [31:0] fp16_to_q16_16(
     input logic [15:0] fp16_bits
@@ -135,21 +141,9 @@ module embedding_quantizer (
     end
   endfunction
 
-  function automatic logic [15:0] row_fp16_word(
-    input logic [(M_TILE * D_MODEL * EMBED_ELEM_W)-1:0] rows_flat,
-    input int unsigned row_idx,
-    input int unsigned col_idx
-  );
-    int unsigned bit_idx;
-    begin
-      bit_idx = ((row_idx * D_MODEL) + col_idx) * EMBED_ELEM_W;
-      row_fp16_word = rows_flat[bit_idx +: EMBED_ELEM_W];
-    end
-  endfunction
-
   assign scale_ready_o = !scale_captured_q && (state_q == EQ_IDLE);
   assign row_ready_o = scale_captured_q &&
-                       ((state_q == EQ_IDLE) || (state_q == EQ_COLLECT)) &&
+                       (state_q == EQ_IDLE) &&
                        (batch_row_count_q < M_TILE);
   assign scale_out_valid_o = (state_q == EQ_OUT_SCALE);
   assign act_valid_o = (state_q == EQ_OUT_ACT);
@@ -170,9 +164,11 @@ module embedding_quantizer (
     scale_bus_d.tag.elem_count = ELEM_COUNT_W'(SCALE_VECTOR_ELEMS);
     scale_bus_d.tag.is_partial = (batch_row_count_q != M_TILE);
     scale_bus_d.tag.is_last = batch_last_q;
-    scale_bus_d.data = scale_q.data;
+    scale_bus_d.data = scale_data_q;
 
     act_bus_d = '0;
+    act_data_flat_d = '0;
+
     act_bus_d.tag.layer_id = '0;
     act_bus_d.tag.block_id = BLOCK_EMBED;
     act_bus_d.tag.gemm_mode = GEMM_NONE;
@@ -184,28 +180,32 @@ module embedding_quantizer (
     act_bus_d.tag.elem_count = batch_row_count_q * N_TILE;
     act_bus_d.tag.is_partial = (batch_row_count_q != M_TILE);
     act_bus_d.tag.is_last = batch_last_q && (feature_tile_idx_q == FEATURE_TILE_COUNT - 1);
-    act_bus_d.data = act_data_w;
+    for (int row_local = 0; row_local < M_TILE; row_local++) begin
+      if (row_local < batch_row_count_q) begin
+        for (int col_local = 0; col_local < N_TILE; col_local++) begin
+          act_data_flat_d[(((row_local * N_TILE) + col_local) * ACT_W) +: ACT_W] =
+            quant_tile_storage_q[row_local][feature_tile_idx_q][(col_local * ACT_W) +: ACT_W];
+        end
+      end
+    end
+    act_bus_d.data = act_data_flat_d;
   end
 
   generate
-    for (genvar lane = 0; lane < ACT_VECTOR_ELEMS; lane++) begin : g_act_lane
-      localparam int unsigned ROW_LOCAL = lane / N_TILE;
-      localparam int unsigned COL_LOCAL = lane % N_TILE;
-      // Each 32-lane row slice in the batch tile consumes one scale entry.
-      assign act_data_w[lane] =
-        (ROW_LOCAL < batch_row_count_q) ?
-          quantize_fixed_lane(
-            fp16_to_q16_16(
-              row_fp16_word(
-                rows_flat_q,
-                ROW_LOCAL,
-                (feature_tile_idx_q * N_TILE) + COL_LOCAL
-              )
-            ),
-            scale_q.data[ROW_LOCAL]
-          ) :
-          '0;
+    for (genvar quant_lane = 0; quant_lane < N_TILE; quant_lane++) begin : g_quant_lane
+      // Quantize one 32-element feature-tile row per cycle, then buffer the
+      // INT8 result. This avoids a 512-way divider fanout at output time.
+      assign quant_tile_data_w[quant_lane] =
+        quantize_fixed_lane(
+          fp16_to_q16_16(
+            current_row_fp16_q[
+              (((quant_feature_tile_idx_q * N_TILE) + quant_lane) * EMBED_ELEM_W) +: EMBED_ELEM_W
+            ]
+          ),
+          scale_data_q[quant_row_slot_q]
+        );
     end
+
   endgenerate
 
   always_ff @(posedge ap_clk) begin
@@ -214,35 +214,48 @@ module embedding_quantizer (
     if (!ap_rst_n) begin
       state_q            <= EQ_IDLE;
       scale_captured_q   <= 1'b0;
-      scale_q            <= '0;
-      rows_flat_q        <= '0;
+      scale_data_q       <= '0;
+      current_row_fp16_q <= '0;
       batch_row_count_q  <= '0;
       batch_token_base_q <= '0;
       batch_last_q       <= 1'b0;
       feature_tile_idx_q <= '0;
+      quant_row_slot_q   <= '0;
+      quant_feature_tile_idx_q <= '0;
+      current_row_last_q <= 1'b0;
     end else begin
       if (scale_valid_i && scale_ready_o) begin
-        scale_q          <= scale_i;
+        scale_data_q     <= scale_i.data;
         scale_captured_q <= 1'b1;
       end
 
       unique case (state_q)
-        EQ_IDLE,
-        EQ_COLLECT: begin
+        EQ_IDLE: begin
           if (row_valid_i && row_ready_o) begin
-            rows_flat_q[(batch_row_count_q * EMBED_ROW_W) +: EMBED_ROW_W] <= row_fp16_i;
+            current_row_fp16_q <= row_fp16_i;
+            quant_row_slot_q <= batch_row_count_q;
+            quant_feature_tile_idx_q <= '0;
+            current_row_last_q <= row_meta_i.tag.is_last;
             if (batch_row_count_q == '0) begin
               batch_token_base_q <= row_meta_i.tag.token_base;
             end
-            batch_row_count_q <= batch_row_count_q + 1'b1;
-            batch_last_q <= row_meta_i.tag.is_last;
+            state_q <= EQ_QUANTIZE;
+          end
+        end
 
-            if ((batch_row_count_q + 1'b1 == M_TILE) || row_meta_i.tag.is_last) begin
+        EQ_QUANTIZE: begin
+          quant_tile_storage_q[quant_row_slot_q][quant_feature_tile_idx_q] <= quant_tile_data_w;
+          if (quant_feature_tile_idx_q == FEATURE_TILE_COUNT - 1) begin
+            batch_row_count_q <= batch_row_count_q + 1'b1;
+            batch_last_q <= current_row_last_q;
+            if ((batch_row_count_q + 1'b1 == M_TILE) || current_row_last_q) begin
               feature_tile_idx_q <= '0;
               state_q <= EQ_OUT_SCALE;
             end else begin
-              state_q <= EQ_COLLECT;
+              state_q <= EQ_IDLE;
             end
+          end else begin
+            quant_feature_tile_idx_q <= quant_feature_tile_idx_q + 1'b1;
           end
         end
 
@@ -261,14 +274,12 @@ module embedding_quantizer (
                 batch_row_count_q <= '0;
                 batch_token_base_q <= '0;
                 batch_last_q <= 1'b0;
-                rows_flat_q <= '0;
                 state_q <= EQ_IDLE;
               end else begin
                 batch_row_count_q <= '0;
-                batch_token_base_q <= batch_token_base_q + batch_row_count_q[POS_W-1:0];
+                batch_token_base_q <= batch_token_base_q + POS_W'(batch_row_count_q);
                 batch_last_q <= 1'b0;
-                rows_flat_q <= '0;
-                state_q <= EQ_COLLECT;
+                state_q <= EQ_IDLE;
               end
               feature_tile_idx_q <= '0;
             end else begin

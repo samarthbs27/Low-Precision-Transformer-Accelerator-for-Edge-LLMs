@@ -21,6 +21,15 @@ The implementation strategy is reuse-heavy:
 - one shared INT8 GEMM engine reused across Q, K, V, attention scores, weighted sum, O, gate, up, down, and LM head
 - HBM used as the backing store for weights, KV cache, and debug buffers
 
+The current repo frontier is the first post-Phase-9 real-inference closure
+slice:
+
+- `runtime_embedding_frontend.sv` now performs real prefill embedding ingress
+- `tinyllama_u55c_kernel_top.sv` waits for completed embedding ingress before
+  launching the reused layer path
+- the decoder/final-RMS/LM-head/argmax path is still being integrated, so the
+  top-level is not yet a true token-generating TinyLlama datapath
+
 ---
 
 ## Finalized Architecture
@@ -57,6 +66,7 @@ Project/
     golden_trace_plan.md
     u55c_bringup_checklist.md
     real_inference_closure_plan.md
+    Installation_guide_ug1468-alveo-u55c.pdf
     parallelism_tradeoffs.md
     block_diagram.drawio
     block_diagram.md
@@ -97,6 +107,8 @@ Project/
       tile_buffer_bank.sv
       kv_cache_manager.sv
     compute/
+      embedding_lookup.sv
+      embedding_quantizer.sv
       mac_lane.sv
       accumulator_bank.sv
       requantize_unit.sv
@@ -108,6 +120,7 @@ Project/
       rope_unit.sv
       gqa_router.sv
       causal_mask_unit.sv
+      residual_add.sv
       elementwise_mul.sv
       lm_head_controller.sv
       argmax_reduction.sv
@@ -117,7 +130,9 @@ Project/
       softmax_wrapper.sv
       silu_wrapper.sv
     top/
+      runtime_embedding_frontend.sv
       tinyllama_u55c_kernel_top.sv
+      tinyllama_u55c_shell_wrapper.sv
     tb/
       README.md
       tb_stream_fifo.sv
@@ -154,7 +169,10 @@ Project/
       tb_debug_capture_mux.sv
       tb_decoder_layer_smoke.sv
       tb_prefill_decode_smoke.sv
+      tb_runtime_embedding_frontend.sv
       tb_kernel_top_smoke.sv
+      tb_kernel_top_acceptance.sv
+      tb_shell_wrapper_smoke.sv
     control_fsm.sv
     top.sv
     mac_unit.sv
@@ -290,13 +308,35 @@ Project/
   - wrapper smoke under shell-side backpressure
 - `model/export_fpga_vectors.py` now also exports Phase 9 runtime-acceptance
   fixtures under `sim/golden_traces/phase9/rtl/`.
+- Post-Phase-9 real inference closure has started:
+  - `rtl/top/runtime_embedding_frontend.sv` now fetches real embedding-output
+    scale metadata plus real embedding rows during prefill
+  - `rtl/top/tinyllama_u55c_kernel_top.sv` now gates prefill completion on
+    finished embedding ingress rather than only prompt-token fetch
+  - `rtl/compute/embedding_quantizer.sv` now uses the current vendor-hardened
+    microarchitecture: quantize one `N_TILE = 32` row-local feature slice per
+    cycle during ingest, buffer INT8 feature tiles, then assemble the emitted
+    512-lane batch tiles
+- Current local regression frontier after that rework is green:
+  - `tb_embedding_quantizer.sv`
+  - `tb_runtime_embedding_frontend.sv`
+  - `tb_kernel_top_smoke.sv`
+  - `tb_kernel_top_acceptance.sv`
+  - `tb_shell_wrapper_smoke.sv`
+- Current Vivado synthesis checkpoints are also materially better:
+  - `embedding_quantizer.sv` synthesizes cleanly as a leaf top
+  - `runtime_embedding_frontend.sv` synthesizes cleanly as the next parent
+  - `tinyllama_u55c_kernel_top.sv` synthesizes cleanly as the current runtime
+    top
+  - the current shell-wrapper rerun after this slice is still pending
 - `docs/` now describe the full TinyLlama prefill/decode accelerator that the project is building toward.
 
 The repo now contains hardened production modules through the first concrete
-Phase 9 runtime-acceptance and shell-wrapper step. The next milestone is
-platform closure beyond the normalized shell DMA seam: vendor synthesis
-bring-up and the eventual raw `m_axi_pc00..pc31` platform binding around the
-verified runtime core and shell wrapper.
+post-Phase-9 real-inference closure slice. The next milestone is the
+integrated decoder datapath: replace the current synthetic block-completion
+path, then wire final RMSNorm, real LM head, and real argmax into
+`tinyllama_u55c_kernel_top.sv`. The raw `m_axi_pc00..pc31` wrapper and the
+full Vitis/platform packaging flow remain the outer follow-on step after that.
 
 One practical note: the production RTL we are writing is intended to be
 synthesizable, but a passing Icarus smoke test is only the first gate. The

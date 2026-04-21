@@ -146,6 +146,11 @@ A10. Quantization scale policy
   In `embedding_quantizer.sv`, the active scale entry is selected by
   `row_local = lane / N_TILE`, so each 32-lane row slice in the emitted
   `M_TILE x N_TILE` batch tile consumes exactly one scale-vector entry.
+  The embedding quantizer microarchitecture is fixed to quantize one
+  `N_TILE = 32`-element feature slice per cycle, buffer the resulting INT8
+  tiles per row, and only assemble the full `512`-lane batch tile on the
+  output path. The design must not reinstate a `512`-way divide/modulo
+  quantization fanout at output time.
   Nonlinear wrapper scale contract is fixed to:
     - RMSNorm consumes an input activation scale and an output quantization scale
     - SiLU consumes an input activation scale and an output quantization scale

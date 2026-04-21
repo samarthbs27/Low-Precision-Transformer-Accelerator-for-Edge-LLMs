@@ -23,6 +23,18 @@ This file is intentionally execution-oriented. It answers:
 
 Trace-backed verification policy is defined in `golden_trace_plan.md`.
 
+Current vendor-synthesis hardening note for this slice:
+
+- `embedding_quantizer.sv` should keep the current two-part hardening shape
+  during real-inference closure:
+  - quantize one `N_TILE = 32`-element row-local feature slice per cycle during
+    row ingest
+  - buffer per-row INT8 feature tiles before assembling the emitted 512-lane
+    batch tile
+  Avoid reintroducing either a batch-global flattened FP16 store with wide
+  dynamic part-selects or a `512`-way divide/modulo quantization fanout on the
+  output path; both shapes drove Vivado into an unstable post-synthesis tail.
+
 ---
 
 ## 1. Implementation Rules

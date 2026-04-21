@@ -111,7 +111,7 @@ These Phase 6 production compute files now exist under `rtl/compute/`.
 | File | What it is | Smoke test |
 |------|------------|------------|
 | `compute/embedding_lookup.sv` | Embedding-row fetch controller that turns one token into one full `4096-byte` `TENSOR_EMBED` DMA request, assembles `128` `256-bit` beats, and emits one FP16 embedding row plus token metadata. | Regenerate the Phase 6 fixtures, then run `rtl/tb/tb_embedding_lookup.sv`. |
-| `compute/embedding_quantizer.sv` | FP16 embedding-row quantizer that batches up to `16` rows, emits one `BLOCK_EMBED` scale vector, and streams `64` row-major INT8 activation tiles into the decoder datapath. | Regenerate the Phase 6 fixtures, then run `rtl/tb/tb_embedding_quantizer.sv`. |
+| `compute/embedding_quantizer.sv` | FP16 embedding-row quantizer that now quantizes one `N_TILE = 32` row-local feature slice per cycle during ingest, buffers per-row INT8 feature tiles, emits one `BLOCK_EMBED` scale vector, and streams `64` row-major INT8 activation tiles into the decoder datapath without the old `512`-way output-time divide/modulo fanout. | Regenerate the Phase 6 fixtures, then run `rtl/tb/tb_embedding_quantizer.sv`. |
 | `compute/residual_add.sv` | Aligned INT32 residual leaf that captures matching `acc_bus` tiles, retags them as residual1/residual2, and sums active lanes with zero-filled tails. | Regenerate the Phase 6 fixtures, then run `rtl/tb/tb_residual_add.sv`. |
 | `compute/elementwise_mul.sv` | Real SwiGLU leaf that captures SiLU and `up_proj` activation tiles, multiplies them lane-wise as `INT8 x INT8 -> INT32`, and forwards the result to the down-projection requantization path. | Regenerate the Phase 6 fixtures, then run `rtl/tb/tb_elementwise_mul.sv`. |
 | `compute/lm_head_controller.sv` | Outer vocabulary-tile controller for LM head that reuses the one-tile GEMM scheduler 250 times, holds the final hidden-state context stable, and retags partial logits for the argmax path. | Run `rtl/tb/tb_lm_head_controller.sv`. |
@@ -153,6 +153,29 @@ and the first platform-facing wrapper step around the normalized DMA boundary.
 | `tb/tb_kernel_top_acceptance.sv` | Exported Phase 9 acceptance bench for abort during `RUN_LAYERS`, relaunch, sticky-status clear, host-visible status words, and integrated command/prompt/writeback counts. | Regenerate the Phase 9 fixtures, then run `rtl/tb/tb_kernel_top_acceptance.sv`. |
 | `tb/tb_shell_wrapper_smoke.sv` | Exported Phase 9 wrapper smoke that runs the runtime case through `tinyllama_u55c_shell_wrapper.sv` under shell-side backpressure. | Regenerate the Phase 9 fixtures, then run `rtl/tb/tb_shell_wrapper_smoke.sv`. |
 
+## Current Integration Frontier
+
+The repo has moved past the original Phase 9 runtime harness and is now in the
+first real-inference closure slice.
+
+What is now true:
+
+- `top/runtime_embedding_frontend.sv` performs real prefill embedding ingress
+  through `embedding_lmhead_dma_reader.sv`, `embedding_lookup.sv`, and the
+  hardened `embedding_quantizer.sv`
+- `top/tinyllama_u55c_kernel_top.sv` waits for that embedding ingress to finish
+  before launching the reused layer path
+- `tb_embedding_quantizer.sv`, `tb_runtime_embedding_frontend.sv`,
+  `tb_kernel_top_smoke.sv`, `tb_kernel_top_acceptance.sv`, and
+  `tb_shell_wrapper_smoke.sv` all pass against the current slice
+
+What is still intentionally incomplete:
+
+- `tinyllama_u55c_kernel_top.sv` still uses synthetic block/LM/token closure
+  after the embedding slice
+- the decoder datapath, final RMSNorm, real LM head, and real argmax are the
+  next integration milestone
+
 ## Synthesis Readiness
 
 The production RTL under `rtl/common/`, `rtl/control/`, and the later
@@ -184,6 +207,21 @@ Use this checklist as we add new production RTL:
   integration command
 - later, before calling a block synthesis-ready in the strongest sense, it still
   needs a real vendor-tool synthesis pass
+
+Current vendor-tool checkpoint status for the post-Phase-9 slice:
+
+- `embedding_quantizer.sv` now synthesizes cleanly in Vivado as a leaf top
+- `runtime_embedding_frontend.sv` now synthesizes cleanly as the next parent
+- `tinyllama_u55c_kernel_top.sv` now synthesizes cleanly as the current runtime
+  top
+- the shell-wrapper rerun after the current quantizer/frontend hardening is
+  still pending
+
+One important interpretation note:
+
+- the current kernel-top synth is structurally useful, but its utilization is
+  artificially low because the emitted embedding activation/scale payloads are
+  not yet consumed by the downstream decoder datapath
 
 ## Legacy Validation Files
 

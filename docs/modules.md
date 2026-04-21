@@ -678,6 +678,10 @@ hardware implementation.
 - Concrete contract:
   - consumes fully assembled FP16 embedding rows from `embedding_lookup.sv`
   - batches up to `M_TILE = 16` rows before emission
+  - quantizes one `N_TILE = 32`-element feature slice per cycle while ingesting
+    each row, then buffers the resulting INT8 feature tiles per row/batch slot
+  - the output path assembles the emitted `512`-lane tile only from buffered
+    INT8 row slices; it does not perform a `512`-way divide/modulo fanout
   - one batch emits:
     - one scale vector tagged for `BLOCK_EMBED`
     - `D_MODEL / N_TILE = 64` activation tiles
@@ -694,8 +698,12 @@ hardware implementation.
   - the embedding FP16-to-Q16.16 unpack path uses round-half-up on right shifts;
     compared with the banker's-rounding path used for RMSNorm gamma unpack, the
     difference is at most 1 LSB when discarded bits are present
+  - completed/idle batches do not bulk-clear the stored quantized row payloads;
+    only the currently captured `row_count` rows are ever observable on the
+    output path
 - Parallelism:
-  - elementwise vector quantization across one activation tile.
+  - `32` quantization lanes across one row-local feature tile during ingest,
+    then row-major `512`-lane batch-tile assembly at output.
 
 #### M21. `shared_gemm_engine.sv`
 
