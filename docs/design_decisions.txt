@@ -220,8 +220,11 @@ A14. On-chip controller replaces per-GEMM host sequencing
       launching downstream work
     - prefill launch pulses `prompt_read_start`, waits for
       `prompt_read_done`, then starts the layer engine
-    - decode-only launch skips the prompt reader and starts the layer engine
-      immediately after command decode
+    - decode-only launch skips the prompt reader but still requests embedding
+      ingress and waits for that ingress to complete before starting the layer
+      engine
+    - each non-stopping emitted decode token is fed back through the runtime
+      embedding ingress path before the next layer pass starts
     - after each layer pass that requires token selection,
       `lm_head_start` and `argmax_start` pulse together
     - runtime-visible done/error/stop state is retained until a new launch
@@ -500,6 +503,60 @@ B11c. First real-inference closure slice
   launch and treats prefill ingress as complete only after the embedding
   frontend finishes, not merely after the prompt-token list has been fetched
   from PC30.
+
+B11d. Runtime final-RMSNorm closure step
+  The next concrete closure step after real embedding ingress and decoder
+  scheduling is fixed to `runtime_final_rmsnorm_tail.sv`.
+  It composes:
+    - `embedding_lmhead_dma_reader.sv`
+    - `rmsnorm_wrapper.sv`
+  into one runtime helper that turns the current deterministic block-driven
+  `BLOCK_FINAL_RMSNORM` hidden-state scaffold into a post-RMSNorm runtime
+  stream before token selection.
+  For the current normalized-shell runtime harness, the canonical base address
+  is frozen to:
+    - final RMSNorm gamma: `0x0000_0000_0800_0000`
+  `tinyllama_u55c_kernel_top.sv` now arbitrates the shared normalized
+  embed/meta read seam between `runtime_embedding_frontend.sv` and
+  `runtime_final_rmsnorm_tail.sv`.
+  The current runtime harness feeds the final RMSNorm helper from a stable
+  dedicated output-scale source in `tinyllama_u55c_kernel_top.sv`. Do not drive
+  this contract from a live decoder bus; the long-term replacement is a
+  configured final-RMSNorm output-scale path.
+
+B11e. Local RMSNorm HLS-IP simulation model
+  Local Icarus integration tests now use
+  `rtl/nonlinear/rmsnorm_core_hls_ip.sv` as a repo-owned simulation model for
+  the HLS-IP boundary behind `rmsnorm_wrapper.sv`.
+  This file is a simulation aid for runtime integration; it is not, by itself,
+  a new Vivado synthesis checkpoint or a replacement for the actual HLS IP
+  export in the vendor flow.
+
+B11f. Runtime LM-head closure step
+  The runtime token-selection tail is no longer allowed to rely on a synthetic
+  per-vocab-tile logits shim.
+  `runtime_lm_head_tail.sv` is fixed to compose:
+    - `embedding_lmhead_dma_reader.sv`
+    - `shared_gemm_engine.sv`
+    - `lm_head_controller.sv`
+    - `argmax_reduction.sv`
+  into the current runtime LM-head tail.
+  For the normalized-shell runtime harness, the canonical base address is
+  frozen to:
+    - LM-head weights: `0x0000_0000_2000_0000`
+  `tinyllama_u55c_kernel_top.sv` now arbitrates the shared normalized
+  embed/meta read seam among:
+    - `runtime_embedding_frontend.sv`
+    - `runtime_final_rmsnorm_tail.sv`
+    - `runtime_lm_head_tail.sv`
+  The current integrated runtime token stream remains deterministic only
+  because `runtime_decoder_datapath.sv` still evolves hidden state through an
+  upstream deterministic block-driven scaffold instead of the full decoder math
+  chain. That scaffold now includes a coherent FFN tile path plus the real
+  `silu_wrapper.sv` leaf on `BLOCK_SILU` and the real `elementwise_mul.sv`
+  leaf on `BLOCK_GLU_MUL`, but it is still not the final decoder datapath.
+  The next closure step is therefore the real decoder final-hidden path, not
+  another LM-head-tail shim.
 
 B12. Verification policy and golden-trace usage
   Directed smoke tests remain mandatory for control, routing, DMA, and storage

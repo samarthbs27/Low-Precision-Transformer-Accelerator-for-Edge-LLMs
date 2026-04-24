@@ -163,7 +163,7 @@ module tb_prefill_decode_smoke;
       lm_head_done       <= 1'b0;
       token_valid        <= 1'b0;
 
-      if (prompt_read_start) begin
+      if (prompt_read_start || embedding_start) begin
         prompt_read_done <= 1'b1;
       end
 

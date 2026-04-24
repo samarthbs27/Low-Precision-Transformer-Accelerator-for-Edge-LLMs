@@ -8,6 +8,12 @@ module tb_kernel_top_acceptance;
   localparam int unsigned TRACE_META_WORDS = 13;
   localparam int unsigned TRACE_PROMPT_MAX = 16;
   localparam int unsigned SCALE_BEATS = (SCALE_VECTOR_ELEMS * SCALE_W) / DMA_BEAT_W;
+  localparam int unsigned LMHEAD_TILE_COUNT = (VOCAB_SIZE + VOCAB_TILE - 1) / VOCAB_TILE;
+  localparam int unsigned LMHEAD_GROUPS = VOCAB_TILE / N_TILE;
+  localparam int unsigned LMHEAD_GROUP_BYTES = (D_MODEL / N_TILE) * N_TILE;
+  localparam int unsigned LMHEAD_TILE_BYTES = LMHEAD_GROUPS * LMHEAD_GROUP_BYTES;
+  localparam logic [HBM_ADDR_W-1:0] LM_HEAD_BASE_ADDR = 64'h0000_0000_2000_0000;
+  localparam logic [SCALE_W-1:0] FINAL_RMS_OUTPUT_SCALE_Q16 = 32'h0001_0000;
 
   typedef enum logic [1:0] {
     RD_NONE   = 2'd0,
@@ -52,6 +58,7 @@ module tb_kernel_top_acceptance;
   tensor_id_e             shell_rd_tensor_id_q;
   logic [15:0]            shell_rd_beat_idx_q;
   logic [15:0]            shell_rd_beats_total_q;
+  logic [HBM_ADDR_W-1:0]  shell_rd_addr_q;
   logic                   shell_wr_desc_valid;
   logic                   shell_wr_desc_ready;
   dma_desc_t              shell_wr_desc;
@@ -63,6 +70,9 @@ module tb_kernel_top_acceptance;
   int unsigned            prompt_read_count;
   int unsigned            embed_read_count;
   int unsigned            scale_read_count;
+  int unsigned            gamma_read_count;
+  int unsigned            lmhead_read_count;
+  int unsigned            final_rms_scale_count;
   int unsigned            launch_status_write_count;
   int unsigned            final_status_write_count;
   int unsigned            generated_write_count;
@@ -92,6 +102,17 @@ module tb_kernel_top_acceptance;
     end
   endfunction
 
+  function automatic logic [DMA_BEAT_W-1:0] pack_unit_gamma_beat;
+    logic [DMA_BEAT_W-1:0] beat_value;
+    begin
+      beat_value = '0;
+      for (int lane = 0; lane < (DMA_BEAT_W / 16); lane++) begin
+        beat_value[(lane * 16) +: 16] = 16'h3c00;
+      end
+      return beat_value;
+    end
+  endfunction
+
   function automatic logic [DMA_BEAT_W-1:0] pack_prompt_beat(
     input int unsigned beat_idx,
     input int unsigned prompt_count
@@ -107,6 +128,54 @@ module tb_kernel_top_acceptance;
         end
       end
       return beat_value;
+    end
+  endfunction
+
+  function automatic logic signed [ACT_W-1:0] kernel_hidden_lane_value(
+    input int unsigned tile_idx,
+    input int unsigned lane_idx
+  );
+    begin
+      kernel_hidden_lane_value =
+        dut.u_runtime_lm_head_tail.hidden_last_row_tile_q[tile_idx][(lane_idx * ACT_W) +: ACT_W];
+    end
+  endfunction
+
+  function automatic logic [DMA_BEAT_W-1:0] pack_lmhead_weight_beat(
+    input logic [HBM_ADDR_W-1:0] addr,
+    input int unsigned beat_idx
+  );
+    logic [DMA_BEAT_W-1:0] beat_value;
+    logic [HBM_ADDR_W-1:0] offset;
+    int unsigned tile_idx;
+    int unsigned group_idx;
+    logic [TOKEN_W-1:0] winner_token;
+    logic [TOKEN_W-1:0] candidate_token;
+    logic signed [ACT_W-1:0] hidden_val;
+    logic signed [WEIGHT_W-1:0] sign_weight;
+    begin
+      beat_value = '0;
+      offset = addr - LM_HEAD_BASE_ADDR;
+      tile_idx = offset / LMHEAD_TILE_BYTES;
+      group_idx = (offset % LMHEAD_TILE_BYTES) / LMHEAD_GROUP_BYTES;
+      winner_token = TOKEN_W'(32'd0);
+      for (int lane = 0; lane < N_TILE; lane++) begin
+        candidate_token = TOKEN_W'((tile_idx * VOCAB_TILE) + (group_idx * N_TILE) + lane);
+        hidden_val = kernel_hidden_lane_value(beat_idx, lane);
+        if (hidden_val > 0) begin
+          sign_weight = WEIGHT_W'(8'sd1);
+        end else if (hidden_val < 0) begin
+          sign_weight = WEIGHT_W'(-8'sd1);
+        end else begin
+          sign_weight = '0;
+        end
+        if (candidate_token == winner_token) begin
+          beat_value[(lane * WEIGHT_W) +: WEIGHT_W] = sign_weight;
+        end else begin
+          beat_value[(lane * WEIGHT_W) +: WEIGHT_W] = -sign_weight;
+        end
+      end
+      pack_lmhead_weight_beat = beat_value;
     end
   endfunction
 
@@ -154,12 +223,16 @@ module tb_kernel_top_acceptance;
       shell_rd_tensor_id_q     <= TENSOR_NONE;
       shell_rd_beat_idx_q      <= '0;
       shell_rd_beats_total_q   <= '0;
+      shell_rd_addr_q          <= '0;
       shell_rd_data_valid      <= 1'b0;
       shell_rd_data            <= '0;
       command_read_count       <= 0;
       prompt_read_count        <= 0;
       embed_read_count         <= 0;
       scale_read_count         <= 0;
+      gamma_read_count         <= 0;
+      lmhead_read_count        <= 0;
+      final_rms_scale_count    <= 0;
       launch_status_write_count <= 0;
       final_status_write_count <= 0;
       generated_write_count    <= 0;
@@ -171,12 +244,31 @@ module tb_kernel_top_acceptance;
         interrupt_cycle_count <= interrupt_cycle_count + 1;
       end
 
+      if (dut.final_rms_scale_valid && dut.final_rms_scale_ready) begin
+        final_rms_scale_count <= final_rms_scale_count + 1;
+        if (dut.u_runtime_final_rmsnorm_tail.u_final_rmsnorm_wrapper.output_scale_q != FINAL_RMS_OUTPUT_SCALE_Q16) begin
+          $error("tb_kernel_top_acceptance final RMS scale integration mismatch scale_q=0x%0h",
+                 dut.u_runtime_final_rmsnorm_tail.u_final_rmsnorm_wrapper.output_scale_q);
+          $finish;
+        end
+      end
+
       if (shell_rd_burst_active_q && !shell_rd_data_valid) begin
         shell_rd_data_valid <= 1'b1;
         unique case (shell_rd_kind_q)
           RD_CMD:    shell_rd_data <= pack_command_beat();
           RD_PROMPT: shell_rd_data <= pack_prompt_beat(shell_rd_beat_idx_q, trace_meta[4]);
-          RD_EMBED:  shell_rd_data <= (shell_rd_tensor_id_q == TENSOR_SCALE_META) ? pack_unit_scale_beat() : '0;
+          RD_EMBED: begin
+            if (shell_rd_tensor_id_q == TENSOR_SCALE_META) begin
+              shell_rd_data <= pack_unit_scale_beat();
+            end else if (shell_rd_tensor_id_q == TENSOR_FINAL_RMS_GAMMA) begin
+              shell_rd_data <= pack_unit_gamma_beat();
+            end else if (shell_rd_tensor_id_q == TENSOR_LM_HEAD) begin
+              shell_rd_data <= pack_lmhead_weight_beat(shell_rd_addr_q, shell_rd_beat_idx_q);
+            end else begin
+              shell_rd_data <= '0;
+            end
+          end
           default:   shell_rd_data <= '0;
         endcase
       end else if (shell_rd_data_valid && shell_rd_data_ready) begin
@@ -191,7 +283,17 @@ module tb_kernel_top_acceptance;
           unique case (shell_rd_kind_q)
             RD_CMD:    shell_rd_data <= pack_command_beat();
             RD_PROMPT: shell_rd_data <= pack_prompt_beat(shell_rd_beat_idx_q + 1'b1, trace_meta[4]);
-            RD_EMBED:  shell_rd_data <= (shell_rd_tensor_id_q == TENSOR_SCALE_META) ? pack_unit_scale_beat() : '0;
+            RD_EMBED: begin
+              if (shell_rd_tensor_id_q == TENSOR_SCALE_META) begin
+                shell_rd_data <= pack_unit_scale_beat();
+              end else if (shell_rd_tensor_id_q == TENSOR_FINAL_RMS_GAMMA) begin
+                shell_rd_data <= pack_unit_gamma_beat();
+              end else if (shell_rd_tensor_id_q == TENSOR_LM_HEAD) begin
+                shell_rd_data <= pack_lmhead_weight_beat(shell_rd_addr_q, shell_rd_beat_idx_q + 1'b1);
+              end else begin
+                shell_rd_data <= '0;
+              end
+            end
             default:   shell_rd_data <= '0;
           endcase
         end
@@ -206,12 +308,19 @@ module tb_kernel_top_acceptance;
           shell_rd_kind_q <= RD_PROMPT;
         end else if ((shell_rd_desc.region == REGION_EMBED_META) &&
                      ((shell_rd_desc.tensor_id == TENSOR_EMBED) ||
-                      (shell_rd_desc.tensor_id == TENSOR_SCALE_META))) begin
+                      (shell_rd_desc.tensor_id == TENSOR_SCALE_META) ||
+                      (shell_rd_desc.tensor_id == TENSOR_FINAL_RMS_GAMMA))) begin
           if (shell_rd_desc.tensor_id == TENSOR_SCALE_META) begin
             scale_read_count <= scale_read_count + 1;
+          end else if (shell_rd_desc.tensor_id == TENSOR_FINAL_RMS_GAMMA) begin
+            gamma_read_count <= gamma_read_count + 1;
           end else begin
             embed_read_count <= embed_read_count + 1;
           end
+          shell_rd_kind_q <= RD_EMBED;
+        end else if ((shell_rd_desc.region == REGION_LM_HEAD) &&
+                     (shell_rd_desc.tensor_id == TENSOR_LM_HEAD)) begin
+          lmhead_read_count <= lmhead_read_count + 1;
           shell_rd_kind_q <= RD_EMBED;
         end else begin
           $error("tb_kernel_top_acceptance saw unexpected read descriptor tensor=%0d region=%0d addr=0x%0h",
@@ -224,6 +333,7 @@ module tb_kernel_top_acceptance;
         shell_rd_tensor_id_q <= shell_rd_desc.tensor_id;
         shell_rd_beat_idx_q <= '0;
         shell_rd_beats_total_q <= (shell_rd_desc.byte_count + DMA_BEAT_BYTES - 1) / DMA_BEAT_BYTES;
+        shell_rd_addr_q <= shell_rd_desc.addr;
         shell_rd_data_valid <= 1'b0;
       end
 
@@ -240,10 +350,10 @@ module tb_kernel_top_acceptance;
             end
           end
         end else if (shell_wr_desc.addr >= {trace_command_words[HOST_CMD_WORD_GEN_BASE_HI], trace_command_words[HOST_CMD_WORD_GEN_BASE_LO]}) begin
-          if (shell_wr_data[TOKEN_W-1:0] != (32'd1000 + generated_write_count)) begin
+          if (shell_wr_data[TOKEN_W-1:0] != 32'd0) begin
             $error("generated token mismatch at index %0d: expected %0d got %0d",
                    generated_write_count,
-                   32'd1000 + generated_write_count,
+                   32'd0,
                    shell_wr_data[TOKEN_W-1:0]);
             $finish;
           end
@@ -342,7 +452,7 @@ module tb_kernel_top_acceptance;
       while (final_status_write_count < expected_count) begin
         @(negedge clk);
         wait_cycles++;
-        if (wait_cycles > 40000) begin
+        if (wait_cycles > 450000) begin
           $error("tb_kernel_top_acceptance timeout waiting for %s final status", what);
           $finish;
         end
@@ -469,8 +579,8 @@ module tb_kernel_top_acceptance;
       $finish;
     end
     axi_read(REGW_LAST_TOKEN_ID << 2, readback);
-    if (readback != 32'd1001) begin
-      $error("completion last-token-id expected 1001, got %0d", readback);
+    if (readback != 32'd0) begin
+      $error("completion last-token-id expected 0, got %0d", readback);
       $finish;
     end
 
@@ -482,11 +592,26 @@ module tb_kernel_top_acceptance;
       $error("expected %0d prompt reads, got %0d", (2 * trace_meta[9]), prompt_read_count);
       $finish;
     end
-    if (scale_read_count != 2 || embed_read_count != (2 * trace_meta[4])) begin
-      $error("expected two scale reads and %0d embedding reads, got scale=%0d embed=%0d",
-             (2 * trace_meta[4]),
+    if (scale_read_count != (2 + trace_meta[10] - 1) ||
+        gamma_read_count != (trace_meta[10] + 1) ||
+        embed_read_count != ((2 * trace_meta[4]) + trace_meta[10] - 1)) begin
+      $error("expected %0d scale reads, %0d gamma reads, and %0d embedding reads, got scale=%0d gamma=%0d embed=%0d",
+             (2 + trace_meta[10] - 1),
+             (trace_meta[10] + 1),
+             ((2 * trace_meta[4]) + trace_meta[10] - 1),
              scale_read_count,
+             gamma_read_count,
              embed_read_count);
+      $finish;
+    end
+    if (final_rms_scale_count == 0) begin
+      $error("expected at least one final RMS scale emission");
+      $finish;
+    end
+    if (lmhead_read_count != (trace_meta[10] * LMHEAD_TILE_COUNT * LMHEAD_GROUPS)) begin
+      $error("expected %0d LM-head group reads, got %0d",
+             (trace_meta[10] * LMHEAD_TILE_COUNT * LMHEAD_GROUPS),
+             lmhead_read_count);
       $finish;
     end
     if (generated_write_count != trace_meta[10]) begin
@@ -500,7 +625,7 @@ module tb_kernel_top_acceptance;
     end
     if (completion_status_payload[31:0] != trace_meta[11] ||
         completion_status_payload[(HOST_STATUS_WORD_GEN_COUNT*32) +: 32] != trace_meta[10] ||
-        completion_status_payload[(HOST_STATUS_WORD_LAST_TOKEN*32) +: 32] != 32'd1001) begin
+        completion_status_payload[(HOST_STATUS_WORD_LAST_TOKEN*32) +: 32] != 32'd0) begin
       $error("completion status payload mismatch");
       $finish;
     end

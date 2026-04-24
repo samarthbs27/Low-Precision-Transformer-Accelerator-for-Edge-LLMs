@@ -8,7 +8,10 @@ Current regression frontier:
 
 - the Phase 9 runtime-acceptance benches still pass
 - the first post-Phase-9 real-inference closure slice now also passes through
-  `tb_runtime_embedding_frontend.sv`
+  `tb_runtime_embedding_frontend.sv`, `tb_runtime_decoder_datapath.sv`,
+  `tb_runtime_final_rmsnorm_tail.sv`, and `tb_runtime_lm_head_tail.sv`
+- the runtime final-RMSNorm integration keeps the exact Phase 5 wrapper gate
+  alive through `tb_rmsnorm_wrapper.sv`
 - the hardened embedding quantizer microarchitecture remains covered by
   `tb_embedding_quantizer.sv`
 
@@ -47,6 +50,9 @@ Current regression frontier:
 | `tb_embedding_lookup.sv` | Directed plus exported Phase 6 trace-backed smoke test for embedding-row DMA request generation and full-row FP16 assembly. | Run the `tb_embedding_lookup` command below. |
 | `tb_embedding_quantizer.sv` | Directed plus exported Phase 6 trace-backed smoke test for the current ingest-time embedding quantizer: FP16 row capture, Q16.16 scale-based quantization over one `N_TILE = 32` slice per cycle, scale emission, buffered INT8 feature-tile storage, and 512-lane activation-tile output assembly. | Run the `tb_embedding_quantizer` command below. |
 | `tb_runtime_embedding_frontend.sv` | Exported trace-backed integration smoke for the new runtime embedding frontend, including scale fetch, one real embedding-row DMA burst, and emitted INT8 tiles. | Run the `tb_runtime_embedding_frontend` command below. |
+| `tb_runtime_decoder_datapath.sv` | TinyLlama-scale decoder smoke for the new runtime decoder helper, including one real embedding batch, all 22 layers of block completion, a coherent FFN tile chain, the real `shared_gemm_engine.sv` firing once per layer on `BLOCK_GATE`, `BLOCK_UP`, `BLOCK_DOWN`, and `BLOCK_O`, the real `silu_wrapper.sv` leaf firing once per layer on `BLOCK_SILU`, the real `elementwise_mul.sv` leaf firing once per layer on `BLOCK_GLU_MUL`, the staged `BLOCK_WEIGHTED_SUM -> BLOCK_O -> BLOCK_RESIDUAL1` path, and final-hidden emission. | Run the `tb_runtime_decoder_datapath` command below. |
+| `tb_runtime_final_rmsnorm_tail.sv` | TinyLlama-scale runtime final-RMSNorm smoke for real final-gamma DMA plus the real `rmsnorm_wrapper.sv` handoff over one full `D_MODEL = 2048` hidden state. | Run the `tb_runtime_final_rmsnorm_tail` command below. |
+| `tb_runtime_lm_head_tail.sv` | TinyLlama-scale runtime-tail smoke for the real LM-head DMA/shared-GEMM/controller/argmax path across all 250 vocab tiles. | Run the `tb_runtime_lm_head_tail` command below. |
 | `tb_residual_add.sv` | Directed plus exported Phase 6 trace-backed smoke test for aligned residual1/residual2 INT32 accumulation and tag retiming. | Run the `tb_residual_add` command below. |
 | `tb_elementwise_mul.sv` | Directed plus exported Phase 6 trace-backed smoke test for the SwiGLU `SiLU(gate) * up` multiply leaf. | Run the `tb_elementwise_mul` command below. |
 | `tb_lm_head_controller.sv` | Directed controller smoke test for the outer LM-head vocab-tile loop and partial-logit retagging path. | Run the `tb_lm_head_controller` command below. |
@@ -691,6 +697,125 @@ Expected pass string:
 PASS: tb_runtime_embedding_frontend
 ```
 
+### `tb_runtime_decoder_datapath.sv`
+
+Before running this bench, regenerate the Phase 6 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase6 --layer 0 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_runtime_decoder_datapath.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/control/layer_controller.sv `
+  rtl/compute/residual_add.sv `
+  rtl/compute/requantize_unit.sv `
+  rtl/compute/elementwise_mul.sv `
+  rtl/nonlinear/silu_core_hls_ip.sv `
+  rtl/nonlinear/silu_wrapper.sv `
+  rtl/top/runtime_decoder_datapath.sv `
+  rtl/tb/tb_runtime_decoder_datapath.sv
+vvp sim/tb_runtime_decoder_datapath.vvp
+```
+
+Expected pass string:
+```text
+PASS: tb_runtime_decoder_datapath
+```
+
+### `tb_runtime_final_rmsnorm_tail.sv`
+
+Before running this bench, regenerate the Phase 5 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py --phase phase5 --layer 0 --output-dir sim/golden_traces
+```
+
+Then run:
+
+```powershell
+iverilog -g2012 -o sim/tb_runtime_final_rmsnorm_tail.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/memory/embedding_lmhead_dma_reader.sv `
+  rtl/nonlinear/rmsnorm_core_hls_ip.sv `
+  rtl/nonlinear/rmsnorm_wrapper.sv `
+  rtl/top/runtime_final_rmsnorm_tail.sv `
+  rtl/tb/tb_runtime_final_rmsnorm_tail.sv
+vvp sim/tb_runtime_final_rmsnorm_tail.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_runtime_final_rmsnorm_tail
+```
+
+### `tb_runtime_lm_head_tail.sv`
+
+Before running this bench, regenerate the Phase 6 fixtures:
+
+```powershell
+python model/export_fpga_vectors.py
+```
+
+Recommended fresh rerun:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File sim/run_tb_runtime_lm_head_tail.ps1
+```
+
+That script:
+
+- recompiles the bench from scratch with XSIM
+- runs the AMD tools inside a dedicated per-run work directory under `sim/logs/tb_runtime_lm_head_tail/`
+- stages the required `.memh` fixtures into that run directory so XSIM never depends on repo-root-relative paths
+- keeps `xsim.dir`, `.jou`, `.pb`, and the captured `xvlog` / `xelab` / `xsim` logs out of the repo root
+- still fails closed if neither the default repo-root fixtures nor the staged local fixtures are present
+- treats XSIM's non-fatal `obj` cleanup warning as a warning instead of a false failure
+
+Manual fallback:
+
+```powershell
+iverilog -g2012 -o sim/tb_runtime_lm_head_tail.vvp `
+  rtl/common/tinyllama_pkg.sv `
+  rtl/common/tinyllama_bus_pkg.sv `
+  rtl/common/stream_fifo.sv `
+  rtl/common/skid_buffer.sv `
+  rtl/memory/embedding_lmhead_dma_reader.sv `
+  rtl/compute/shared_gemm_engine.sv `
+  rtl/compute/mac_lane.sv `
+  rtl/compute/accumulator_bank.sv `
+  rtl/compute/lm_head_controller.sv `
+  rtl/compute/argmax_reduction.sv `
+  rtl/top/runtime_lm_head_tail.sv `
+  rtl/tb/tb_runtime_lm_head_tail.sv
+vvp sim/tb_runtime_lm_head_tail.vvp
+```
+
+Expected pass string:
+
+```text
+PASS: tb_runtime_lm_head_tail
+```
+
+Practical note:
+
+- this bench exercises the full LM-head DMA/shared-GEMM/controller/argmax path
+- the bench now fails fast if its Phase 6 fixture files are missing or loaded
+  from the wrong working directory; if you use the manual fallback, run it from
+  the repo root or pass `+QUANT_BASE=<fixture_base>`
+  and is noticeably heavier under Icarus than `tb_lm_head_controller.sv` or
+  `tb_argmax_reduction.sv`
+- if you are debugging a local slowdown, keep those two leaf benches plus the
+  top-level runtime benches (`tb_kernel_top_smoke.sv`,
+  `tb_kernel_top_acceptance.sv`, and `tb_shell_wrapper_smoke.sv`) as the
+  stable verification checkpoint for the same datapath
+
 ### `tb_residual_add.sv`
 
 Before running this bench, regenerate the Phase 6 fixtures:
@@ -855,11 +980,30 @@ iverilog -g2012 -o sim/tb_kernel_top_smoke.vvp `
   rtl/memory/generated_token_writer.sv `
   rtl/compute/embedding_lookup.sv `
   rtl/compute/embedding_quantizer.sv `
+  rtl/compute/residual_add.sv `
+  rtl/compute/requantize_unit.sv `
+  rtl/compute/elementwise_mul.sv `
+  rtl/compute/mac_lane.sv `
+  rtl/compute/accumulator_bank.sv `
+  rtl/compute/shared_gemm_engine.sv `
+  rtl/compute/lm_head_controller.sv `
+  rtl/compute/argmax_reduction.sv `
+  rtl/nonlinear/rmsnorm_core_hls_ip.sv `
+  rtl/nonlinear/rmsnorm_wrapper.sv `
+  rtl/nonlinear/silu_core_hls_ip.sv `
+  rtl/nonlinear/silu_wrapper.sv `
   rtl/top/runtime_embedding_frontend.sv `
+  rtl/top/runtime_decoder_datapath.sv `
+  rtl/top/runtime_final_rmsnorm_tail.sv `
+  rtl/top/runtime_lm_head_tail.sv `
   rtl/top/tinyllama_u55c_kernel_top.sv `
   rtl/tb/tb_kernel_top_smoke.sv
 vvp sim/tb_kernel_top_smoke.vvp
 ```
+
+For the current heavier decoder-closure slice, the fresh green top-level proof
+was captured under XSIM in `sim/logs/xsim_tb_kernel_top_smoke_*` because the
+real projection-GEMM path makes the full Icarus runtime impractically slow.
 
 Expected pass string:
 
@@ -883,6 +1027,7 @@ iverilog -g2012 -o sim/tb_kernel_top_acceptance.vvp `
   rtl/common/tinyllama_bus_pkg.sv `
   rtl/common/stream_fifo.sv `
   rtl/common/skid_buffer.sv `
+  rtl/common/descriptor_fifo.sv `
   rtl/control/axi_lite_ctrl_slave.sv `
   rtl/control/kernel_reg_file.sv `
   rtl/control/host_cmd_status_mgr.sv `
@@ -895,11 +1040,31 @@ iverilog -g2012 -o sim/tb_kernel_top_acceptance.vvp `
   rtl/memory/generated_token_writer.sv `
   rtl/compute/embedding_lookup.sv `
   rtl/compute/embedding_quantizer.sv `
+  rtl/compute/residual_add.sv `
+  rtl/compute/requantize_unit.sv `
+  rtl/compute/elementwise_mul.sv `
+  rtl/compute/mac_lane.sv `
+  rtl/compute/accumulator_bank.sv `
+  rtl/compute/shared_gemm_engine.sv `
+  rtl/compute/lm_head_controller.sv `
+  rtl/compute/argmax_reduction.sv `
+  rtl/nonlinear/rmsnorm_core_hls_ip.sv `
+  rtl/nonlinear/rmsnorm_wrapper.sv `
+  rtl/nonlinear/silu_core_hls_ip.sv `
+  rtl/nonlinear/silu_wrapper.sv `
   rtl/top/runtime_embedding_frontend.sv `
+  rtl/top/runtime_decoder_datapath.sv `
+  rtl/top/runtime_final_rmsnorm_tail.sv `
+  rtl/top/runtime_lm_head_tail.sv `
   rtl/top/tinyllama_u55c_kernel_top.sv `
   rtl/tb/tb_kernel_top_acceptance.sv
 vvp sim/tb_kernel_top_acceptance.vvp
 ```
+
+For the current heavier decoder-closure slice, the fresh green top-level proof
+was captured under XSIM in `sim/logs/xsim_tb_kernel_top_acceptance_*` because
+the real projection-GEMM path makes the full Icarus runtime impractically
+slow.
 
 Expected pass string:
 
@@ -923,6 +1088,7 @@ iverilog -g2012 -o sim/tb_shell_wrapper_smoke.vvp `
   rtl/common/tinyllama_bus_pkg.sv `
   rtl/common/stream_fifo.sv `
   rtl/common/skid_buffer.sv `
+  rtl/common/descriptor_fifo.sv `
   rtl/control/axi_lite_ctrl_slave.sv `
   rtl/control/kernel_reg_file.sv `
   rtl/control/host_cmd_status_mgr.sv `
@@ -935,12 +1101,32 @@ iverilog -g2012 -o sim/tb_shell_wrapper_smoke.vvp `
   rtl/memory/generated_token_writer.sv `
   rtl/compute/embedding_lookup.sv `
   rtl/compute/embedding_quantizer.sv `
+  rtl/compute/residual_add.sv `
+  rtl/compute/requantize_unit.sv `
+  rtl/compute/elementwise_mul.sv `
+  rtl/compute/mac_lane.sv `
+  rtl/compute/accumulator_bank.sv `
+  rtl/compute/shared_gemm_engine.sv `
+  rtl/compute/lm_head_controller.sv `
+  rtl/compute/argmax_reduction.sv `
+  rtl/nonlinear/rmsnorm_core_hls_ip.sv `
+  rtl/nonlinear/rmsnorm_wrapper.sv `
+  rtl/nonlinear/silu_core_hls_ip.sv `
+  rtl/nonlinear/silu_wrapper.sv `
   rtl/top/runtime_embedding_frontend.sv `
+  rtl/top/runtime_decoder_datapath.sv `
+  rtl/top/runtime_final_rmsnorm_tail.sv `
+  rtl/top/runtime_lm_head_tail.sv `
   rtl/top/tinyllama_u55c_kernel_top.sv `
   rtl/top/tinyllama_u55c_shell_wrapper.sv `
   rtl/tb/tb_shell_wrapper_smoke.sv
 vvp sim/tb_shell_wrapper_smoke.vvp
 ```
+
+For the current heavier decoder-closure slice, the fresh green top-level proof
+was captured under XSIM in `sim/logs/xsim_tb_shell_wrapper_smoke_*` because
+the real projection-GEMM path makes the full Icarus runtime impractically
+slow.
 
 Expected pass string:
 

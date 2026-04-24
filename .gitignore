@@ -16,9 +16,23 @@ sim/*.vcd
 sim/*.log
 sim/*.jou
 sim/*.wdb
+sim/*.out
+sim/logs/
 sim/*_smoke.cpp
 sim/hls_smoke.cpp
 sim/golden_traces/
+
+# AMD Vivado/XSim scratch if someone accidentally runs from repo root
+/xsim.dir/
+/xvlog.log
+/xelab.log
+/xsim.log
+/xsim.jou
+/xvlog.pb
+/xelab.pb
+/xsim_*.backup.jou
+/xsim_*.backup.log
+/dfx_runtime.txt
 
 # Python cache
 __pycache__/

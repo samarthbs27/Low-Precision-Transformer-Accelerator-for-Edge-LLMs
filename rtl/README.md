@@ -103,6 +103,7 @@ These production nonlinear-wrapper files now exist under `rtl/nonlinear/`.
 | `nonlinear/rmsnorm_wrapper.sv` | RTL wrapper that converts INT8 activation tiles plus FP16 gamma beats into the fixed-point `rmsnorm_core_hls` stream contract, then requantizes the normalized output tile back to INT8. | Regenerate the Phase 5 fixtures, then run `rtl/tb/tb_rmsnorm_wrapper.sv`. |
 | `nonlinear/softmax_wrapper.sv` | RTL wrapper that dequantizes masked INT32 score tiles into Q16.16 chunks for `softmax_core_hls`, then emits the fixed probability scale and INT8 probability tile. | Regenerate the Phase 5 fixtures, then run `rtl/tb/tb_softmax_wrapper.sv`. |
 | `nonlinear/silu_wrapper.sv` | RTL wrapper that dequantizes gate-projection INT8 tiles into Q16.16 chunks for `silu_core_hls`, then requantizes the SiLU output back to INT8. | Regenerate the Phase 5 fixtures, then run `rtl/tb/tb_silu_wrapper.sv`. |
+| `nonlinear/silu_core_hls_ip.sv` | Repo-owned runtime simulation model for the SiLU HLS-IP boundary used by the runtime decoder integration flow. | Compile it alongside `rtl/nonlinear/silu_wrapper.sv` in runtime benches. |
 
 ## Phase 6 Embedding / FFN / LM-Head / Debug
 
@@ -137,10 +138,14 @@ decoder-layer engine.
 
 | File | What it is | Smoke test |
 |------|------------|------------|
-| `top/tinyllama_u55c_kernel_top.sv` | Runtime-core top-level with AXI-Lite control, normalized shell DMA read/write boundary, PC30 command/status handling, real prefill embedding ingress, generated-token writeback, and currently stubbed layer/LM/token closure beyond the embedding slice. | Run `rtl/tb/tb_kernel_top_smoke.sv`. |
-| `top/runtime_embedding_frontend.sv` | First real-inference closure helper that fetches embedding scale metadata, issues embedding-row DMA requests, assembles FP16 rows, and emits INT8 embedding activation tiles. | Run `rtl/tb/tb_runtime_embedding_frontend.sv`. |
+| `top/tinyllama_u55c_kernel_top.sv` | Runtime-core top-level with AXI-Lite control, normalized shell DMA read/write boundary, PC30 command/status handling, real prefill/decode embedding ingress, shared embed/gamma/LM-head read arbitration, generated-token writeback, the current deterministic block-driven decoder final-hidden scaffold, and the real runtime final-RMSNorm plus LM-head tail. | Run `rtl/tb/tb_kernel_top_smoke.sv`. |
+| `top/runtime_embedding_frontend.sv` | First real-inference closure helper that fetches embedding scale metadata, issues embedding-row DMA requests, assembles FP16 rows, and emits INT8 embedding activation tiles for both prefill and decode relaunch. | Run `rtl/tb/tb_runtime_embedding_frontend.sv`. |
+| `top/runtime_decoder_datapath.sv` | First decoder-path integration helper that consumes real embedding outputs, generates TinyLlama-scale block completion, keeps one FFN tile coherent across `GATE -> UP -> SILU -> GLU_MUL -> DOWN`, now routes `BLOCK_GATE`, `BLOCK_UP`, `BLOCK_DOWN`, and `BLOCK_O` through the real `shared_gemm_engine.sv`, uses the real `silu_wrapper.sv` leaf on `BLOCK_SILU`, uses the real `elementwise_mul.sv` leaf on `BLOCK_GLU_MUL`, stages the current weighted-sum tile, applies `BLOCK_RESIDUAL1` on the staged O tile, and emits the accumulated final-hidden scaffold. | Run `rtl/tb/tb_runtime_decoder_datapath.sv`. |
+| `top/runtime_final_rmsnorm_tail.sv` | Runtime final-RMSNorm helper that fetches `TENSOR_FINAL_RMS_GAMMA`, runs the real `rmsnorm_wrapper.sv`, and emits the post-RMSNorm runtime stream for token selection. | Run `rtl/tb/tb_runtime_final_rmsnorm_tail.sv`. |
+| `top/runtime_lm_head_tail.sv` | Runtime-tail helper that fetches real `TENSOR_LM_HEAD` weights, drives the reused `shared_gemm_engine.sv`, wraps the real `lm_head_controller.sv` and `argmax_reduction.sv`, consumes the post-RMSNorm runtime stream, and replaces the old LM/token stub path. | Run `rtl/tb/tb_runtime_lm_head_tail.sv`. |
 | `tb/tb_prefill_decode_smoke.sv` | Exported Phase 8 trace-backed runtime-control smoke for prefill plus a few decode steps using the real TinyLlama reference to generate expected token IDs and runtime counts. | Regenerate the Phase 8 fixtures, then run `rtl/tb/tb_prefill_decode_smoke.sv`. |
-| `tb/tb_kernel_top_smoke.sv` | Exported Phase 8 top-level smoke for AXI-Lite launch, PC30 command fetch, prompt read beats, generated-token writes, final status payload, and interrupt observation against a fake shell DMA model. | Regenerate the Phase 8 fixtures, then run `rtl/tb/tb_kernel_top_smoke.sv`. |
+| `tb/tb_runtime_decoder_datapath.sv` | TinyLlama-scale smoke for the new runtime decoder helper, including one real embedding batch, all 22 layers of block completion, full FFN leaf-chain activity, the staged attention-output `WEIGHTED_SUM -> O -> RESIDUAL1` path, and final-hidden-state emission. | Regenerate the Phase 6 fixtures, then run `rtl/tb/tb_runtime_decoder_datapath.sv`. |
+| `tb/tb_kernel_top_smoke.sv` | Exported Phase 8 top-level smoke for AXI-Lite launch, PC30 command fetch, prompt read beats, decode-token embedding feedback, generated-token writes, final status payload, and interrupt observation against a fake shell DMA model. | Regenerate the Phase 8 fixtures, then run `rtl/tb/tb_kernel_top_smoke.sv`. |
 
 ## Phase 9 Runtime Acceptance And Shell Wrapper
 
@@ -160,21 +165,42 @@ first real-inference closure slice.
 
 What is now true:
 
-- `top/runtime_embedding_frontend.sv` performs real prefill embedding ingress
-  through `embedding_lmhead_dma_reader.sv`, `embedding_lookup.sv`, and the
-  hardened `embedding_quantizer.sv`
+- `top/runtime_embedding_frontend.sv` performs real prefill and decode-token
+  embedding ingress through `embedding_lmhead_dma_reader.sv`,
+  `embedding_lookup.sv`, and the hardened `embedding_quantizer.sv`
+- `top/runtime_decoder_datapath.sv` consumes those embedding outputs and
+  replaces the one-cycle block-done stub with TinyLlama-scale deterministic
+  block completion across all 22 layers and a coherent FFN tile path that now
+  exercises the real `shared_gemm_engine.sv`, `silu_wrapper.sv`, and
+  `elementwise_mul.sv` leaves, plus a staged attention-output path where
+  `BLOCK_O` is now real and `BLOCK_RESIDUAL1` consumes that staged O tile
+- `top/runtime_final_rmsnorm_tail.sv` now fetches real final gamma and applies
+  the real `rmsnorm_wrapper.sv` before token selection
+- `top/runtime_lm_head_tail.sv` now fetches real LM-head weights, drives the
+  reused shared GEMM, and then hands the result to the real LM-head controller
+  and real argmax reducer at the runtime top
 - `top/tinyllama_u55c_kernel_top.sv` waits for that embedding ingress to finish
-  before launching the reused layer path
-- `tb_embedding_quantizer.sv`, `tb_runtime_embedding_frontend.sv`,
+  before launching or relaunching the reused layer path
+- `tb_rmsnorm_wrapper.sv`, `tb_embedding_quantizer.sv`,
+  `tb_lm_head_controller.sv`, `tb_argmax_reduction.sv`,
+  `tb_runtime_embedding_frontend.sv`, `tb_runtime_decoder_datapath.sv`,
+  `tb_runtime_final_rmsnorm_tail.sv`, `tb_runtime_lm_head_tail.sv`,
   `tb_kernel_top_smoke.sv`, `tb_kernel_top_acceptance.sv`, and
-  `tb_shell_wrapper_smoke.sv` all pass against the current slice
+  `tb_shell_wrapper_smoke.sv` all pass
+  against the current slice
+- the fresh top-level runtime proofs for the current slice are now captured
+  under `sim/logs/xsim_tb_kernel_top_smoke_*`,
+  `sim/logs/xsim_tb_kernel_top_acceptance_*`, and
+  `sim/logs/xsim_tb_shell_wrapper_smoke_*`
 
 What is still intentionally incomplete:
 
-- `tinyllama_u55c_kernel_top.sv` still uses synthetic block/LM/token closure
-  after the embedding slice
-- the decoder datapath, final RMSNorm, real LM head, and real argmax are the
-  next integration milestone
+- `runtime_decoder_datapath.sv` still emits a deterministic block-driven
+  final-hidden stream at the `BLOCK_FINAL_RMSNORM` boundary
+- `runtime_final_rmsnorm_tail.sv` still uses a top-supplied output scale
+  contract instead of a dedicated final-RMSNorm output-scale metadata fetch
+- the next integration milestone is the real shared decoder tail that feeds the
+  now-real runtime LM-head datapath
 
 ## Synthesis Readiness
 
@@ -214,14 +240,17 @@ Current vendor-tool checkpoint status for the post-Phase-9 slice:
 - `runtime_embedding_frontend.sv` now synthesizes cleanly as the next parent
 - `tinyllama_u55c_kernel_top.sv` now synthesizes cleanly as the current runtime
   top
-- the shell-wrapper rerun after the current quantizer/frontend hardening is
-  still pending
+- the new `runtime_final_rmsnorm_tail.sv` and `runtime_lm_head_tail.sv` slices
+  still need their own Vivado checkpoints
+- `rtl/nonlinear/rmsnorm_core_hls_ip.sv` is currently a repo-owned local Icarus
+  simulation model and should not be treated as a vendor-synthesis milestone
 
 One important interpretation note:
 
 - the current kernel-top synth is structurally useful, but its utilization is
-  artificially low because the emitted embedding activation/scale payloads are
-  not yet consumed by the downstream decoder datapath
+  still artificially low because the emitted decoder final-hidden stream
+  remains a deterministic scaffold rather than the final downstream compute
+  chain
 
 ## Legacy Validation Files
 

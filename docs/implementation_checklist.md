@@ -400,6 +400,10 @@ Exit criteria for the first closure slice:
   alone finishes
 - prompt-token stream traffic is converted into real embedding activation tiles
   through existing embedding RTL blocks
+- non-stopping decode tokens are looped back through the same runtime embedding
+  ingress path before the next layer pass starts
+- the top-level no longer depends on a one-cycle synthetic block-done path;
+  TinyLlama-scale block completion now comes from a dedicated decoder helper
 - the Phase 8/9 top-level runtime smokes continue to pass with real
   `TENSOR_SCALE_META` and `TENSOR_EMBED` read bursts present on the shell seam
 
@@ -408,6 +412,66 @@ Exit criteria for the first closure slice:
 | R1 | `rtl/top/runtime_embedding_frontend.sv` | RTL | First real-inference closure helper that composes scale fetch, embedding lookup, DMA reader, and embedding quantizer into one runtime slice | `embedding_lmhead_dma_reader.sv`, `embedding_lookup.sv`, `embedding_quantizer.sv` | launch-armed prefill embedding ingress with exported decode-case verification | `rtl/tb/tb_runtime_embedding_frontend.sv` |
 | R2 | `rtl/top/tinyllama_u55c_kernel_top.sv` | RTL update | Replace prefill “prompt tokens fetched” completion with real embedding-ingress completion and route real embedding/meta read traffic through the shell seam | `runtime_embedding_frontend.sv`, `hbm_port_router.sv`, Phase 8/9 runtime harness | prefill embedding ingress real; layer/LM/token path still stubbed | `rtl/tb/tb_kernel_top_smoke.sv`, `rtl/tb/tb_kernel_top_acceptance.sv`, `rtl/tb/tb_shell_wrapper_smoke.sv` |
 | R3 | `rtl/tb/tb_runtime_embedding_frontend.sv` | TB | Trace-backed integration smoke for scale fetch plus one real embedding-row-to-INT8 conversion path | Phase 6 embedding traces, `runtime_embedding_frontend.sv` | one decode row using real TinyLlama export data | run local simulation |
+
+Current implemented extension to that table:
+
+- `rtl/top/runtime_decoder_datapath.sv` now sits between
+  `runtime_embedding_frontend.sv` and `tinyllama_u55c_kernel_top.sv`,
+  consumes real embedding outputs, and replaces the one-cycle block-done stub
+- the current decoder helper now keeps one FFN tile coherent across
+  `BLOCK_GATE`, `BLOCK_UP`, `BLOCK_SILU`, `BLOCK_GLU_MUL`, and `BLOCK_DOWN`
+  instead of treating those blocks as unrelated updates
+- `BLOCK_GATE`, `BLOCK_UP`, and `BLOCK_DOWN` inside that helper now route
+  through the real `shared_gemm_engine.sv`, with `BLOCK_GATE` / `BLOCK_UP`
+  requantizing into staged FFN tiles and `BLOCK_DOWN` feeding the real
+  `residual_add.sv` + `requantize_unit.sv` hidden-state update path
+- `BLOCK_WEIGHTED_SUM`, `BLOCK_O`, and `BLOCK_RESIDUAL1` now form the first
+  coherent attention-output subchain in that helper: weighted-sum staging,
+  real O projection through `shared_gemm_engine.sv`, then residual application
+  back onto the hidden-state tile
+- `rtl/top/tinyllama_u55c_kernel_top.sv` now routes generated decode tokens
+  back through runtime embedding ingress and waits for ingress completion before
+  each decode relaunch
+- `rtl/tb/tb_runtime_decoder_datapath.sv` is the TinyLlama-scale verification
+  gate for the new 22-layer block-completion plus block-driven hidden-state
+  evolution, including the real FFN leaf chain firing once per layer through
+  `gate_gemm=22`, `up_gemm=22`, `down_gemm=22`, `o_gemm=22`,
+  `silu_done=22`, and `mul_done=22`
+- `rtl/top/runtime_lm_head_tail.sv` now wraps the real
+  `lm_head_controller.sv`, `shared_gemm_engine.sv`, and
+  `argmax_reduction.sv`, consumes the current post-RMSNorm runtime stream,
+  fetches real `TENSOR_LM_HEAD` weights, and replaces the old LM/token stub
+  path in `tinyllama_u55c_kernel_top.sv`
+- `rtl/top/runtime_final_rmsnorm_tail.sv` now sits between
+  `runtime_decoder_datapath.sv` and `runtime_lm_head_tail.sv`, fetches
+  `TENSOR_FINAL_RMS_GAMMA`, and runs the real `rmsnorm_wrapper.sv` over the
+  current deterministic decoder-state final-hidden stream
+- `rtl/nonlinear/rmsnorm_core_hls_ip.sv` now provides the repo-owned Icarus
+  simulation model for the RMSNorm HLS-IP boundary during runtime integration
+- `rtl/nonlinear/silu_core_hls_ip.sv` now provides the repo-owned runtime
+  simulation model for the SiLU HLS-IP boundary during runtime integration
+- `rtl/tb/tb_runtime_final_rmsnorm_tail.sv` is the TinyLlama-scale verification
+  gate for real final-gamma DMA plus runtime final-RMSNorm streaming
+- `rtl/tb/tb_runtime_lm_head_tail.sv` is the TinyLlama-scale verification gate
+  for the runtime LM-head sweep and greedy argmax handoff across all
+  `VOCAB_SIZE / VOCAB_TILE = 250` vocab tiles
+- the current normalized-shell base addresses for this extended slice are:
+  - embedding rows: `0x0000_0000_1000_0000`
+  - embedding-output scale metadata: `0x0000_0000_0400_0000`
+  - final RMSNorm gamma: `0x0000_0000_0800_0000`
+  - LM-head weights: `0x0000_0000_2000_0000`
+- the current runtime final-RMSNorm helper still uses a top-supplied
+  `output_scale_i` contract; `tinyllama_u55c_kernel_top.sv` currently feeds it
+  from a stable dedicated local source instead of a live decoder bus
+- the long-term replacement for that temporary local source is a configured
+  final-RMSNorm output-scale path
+- the runtime LM-head tail now uses the real LM-head DMA/shared-GEMM path; the
+  remaining deterministic runtime-tail scaffold is the upstream block-driven
+  decoder final-hidden stream emitted by `runtime_decoder_datapath.sv`
+- the current heavier top-level runtime benches now verify fastest under XSIM;
+  fresh logs for the current slice are recorded under `sim/logs/`
+  `xsim_tb_kernel_top_smoke_*`, `xsim_tb_kernel_top_acceptance_*`, and
+  `xsim_tb_shell_wrapper_smoke_*`
 
 ---
 
@@ -426,7 +490,8 @@ This is the recommended implementation sequence in the actual coding sessions:
 9. Phase 7 decoder-layer integration
 10. Phase 8 top-level runtime integration
 11. Phase 9 runtime acceptance and shell-wrapper closure
-12. Post-Phase-9 real inference closure, beginning with embedding ingress
+12. Post-Phase-9 real inference closure, beginning with embedding ingress,
+    decoder-datapath scaffolding, and the runtime final-RMSNorm tail
 
 Do not start the final top-level kernel file before Phases 1-3 compile cleanly.
 

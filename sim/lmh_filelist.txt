@@ -1,0 +1,13 @@
+../rtl/common/tinyllama_pkg.sv
+../rtl/common/tinyllama_bus_pkg.sv
+../rtl/common/stream_fifo.sv
+../rtl/common/skid_buffer.sv
+../rtl/common/descriptor_fifo.sv
+../rtl/memory/embedding_lmhead_dma_reader.sv
+../rtl/compute/shared_gemm_engine.sv
+../rtl/compute/accumulator_bank.sv
+../rtl/compute/mac_lane.sv
+../rtl/compute/lm_head_controller.sv
+../rtl/compute/argmax_reduction.sv
+../rtl/top/runtime_lm_head_tail.sv
+../rtl/tb/tb_runtime_lm_head_tail.sv

@@ -38,6 +38,12 @@ module tinyllama_u55c_kernel_top (
 
   localparam logic [HBM_ADDR_W-1:0] EMBEDDING_BASE_ADDR = 64'h0000_0000_1000_0000;
   localparam logic [HBM_ADDR_W-1:0] EMBEDDING_SCALE_META_BASE_ADDR = 64'h0000_0000_0400_0000;
+  localparam logic [HBM_ADDR_W-1:0] FINAL_RMS_GAMMA_BASE_ADDR = 64'h0000_0000_0800_0000;
+  localparam logic [HBM_ADDR_W-1:0] LM_HEAD_BASE_ADDR = 64'h0000_0000_2000_0000;
+  // Keep the runtime final-RMSNorm output scale on a stable dedicated source.
+  // This is a temporary fixed integration contract until a real configured
+  // final-RMSNorm output-scale path is wired into the runtime top.
+  localparam logic [SCALE_W-1:0] FINAL_RMS_OUTPUT_SCALE_Q16 = 32'h0001_0000;
 
   logic                       reg_wr_en;
   logic [REG_WORD_ADDR_W-1:0] reg_wr_addr;
@@ -105,6 +111,18 @@ module tinyllama_u55c_kernel_top (
   logic                       prompt_token_valid;
   logic                       prompt_token_ready;
   token_bus_t                 prompt_token;
+  logic                       frontend_launch;
+  logic                       frontend_token_valid;
+  logic                       frontend_token_ready;
+  token_bus_t                 frontend_token;
+  logic                       decode_token_pending_q;
+  token_bus_t                 decode_token_q;
+  logic                       frontend_rd_desc_valid;
+  logic                       frontend_rd_desc_ready;
+  dma_desc_t                  frontend_rd_desc;
+  logic                       frontend_rd_data_valid;
+  logic [DMA_BEAT_W-1:0]      frontend_rd_data;
+  logic                       frontend_rd_data_ready;
   logic                       embed_rd_desc_valid;
   logic                       embed_rd_desc_ready;
   dma_desc_t                  embed_rd_desc;
@@ -113,13 +131,14 @@ module tinyllama_u55c_kernel_top (
   logic                       embed_rd_data_ready;
   logic                       embed_scale_valid;
   scale_bus_t                 embed_scale_bus;
+  logic                       embed_scale_ready;
   logic                       embed_act_valid;
   act_bus_t                   embed_act_bus;
+  logic                       embed_act_ready;
   logic                       embed_busy;
   logic                       embed_done_pulse;
 
   logic                       gen_writer_busy;
-  logic                       gen_writer_token_ready;
   logic                       gen_wr_desc_valid;
   logic                       gen_wr_desc_ready;
   dma_desc_t                  gen_wr_desc;
@@ -153,18 +172,89 @@ module tinyllama_u55c_kernel_top (
   block_id_e                  layer_block_id;
   logic [Q_HEAD_ID_W-1:0]     q_head_id;
   logic [KV_HEAD_ID_W-1:0]    kv_head_id;
-  logic                       sim_block_done_q;
+  logic                       decoder_context_valid;
+  logic                       decoder_block_done;
+  logic                       decoder_final_scale_valid;
+  scale_bus_t                 decoder_final_scale_bus;
+  logic                       decoder_final_scale_ready;
+  logic                       decoder_final_act_valid;
+  act_bus_t                   decoder_final_act_bus;
+  logic                       decoder_final_act_ready;
+  logic                       decoder_final_hidden_done_pulse;
+  logic                       decoder_busy;
+  logic                       final_rms_rd_desc_valid;
+  logic                       final_rms_rd_desc_ready;
+  dma_desc_t                  final_rms_rd_desc;
+  logic                       final_rms_rd_data_valid;
+  logic [DMA_BEAT_W-1:0]      final_rms_rd_data;
+  logic                       final_rms_rd_data_ready;
+  logic                       final_rms_scale_valid;
+  scale_bus_t                 final_rms_scale_bus;
+  logic                       final_rms_scale_ready;
+  logic                       final_rms_act_valid;
+  act_bus_t                   final_rms_act_bus;
+  logic                       final_rms_act_ready;
+  logic                       final_rms_done_pulse;
+  logic                       final_rms_busy;
+  logic                       runtime_lm_head_done_pulse;
+  logic                       runtime_token_valid;
+  logic                       runtime_token_ready;
+  logic [TOKEN_W-1:0]         runtime_token_id;
+  logic signed [ACC_W-1:0]    runtime_token_logit;
+  logic                       runtime_token_fire_q;
+  logic [TOKEN_W-1:0]         runtime_token_fire_id_q;
+  logic                       runtime_lm_context_valid;
+  logic                       runtime_lm_busy;
+  logic                       runtime_argmax_busy;
+  logic                       lm_head_rd_desc_valid;
+  logic                       lm_head_rd_desc_ready;
+  dma_desc_t                  lm_head_rd_desc;
+  logic                       lm_head_rd_data_valid;
+  logic [DMA_BEAT_W-1:0]      lm_head_rd_data;
+  logic                       lm_head_rd_data_ready;
 
-  logic                       sim_lm_head_done_q;
-  logic                       sim_token_valid_q;
-  logic [TOKEN_W-1:0]         sim_token_id_q;
-  logic                       sim_lm_pending_q;
-  logic                       sim_token_pending_q;
   dma_desc_t                  zero_desc;
   logic [DMA_BEAT_W-1:0]      zero_data;
 
+  typedef enum logic [1:0] {
+    EMRD_NONE     = 2'd0,
+    EMRD_FRONTEND = 2'd1,
+    EMRD_FINAL    = 2'd2,
+    EMRD_LM_HEAD  = 2'd3
+  } embed_rd_sel_e;
+
+  embed_rd_sel_e              embed_rd_sel_w;
+  embed_rd_sel_e              embed_rd_active_client_q;
+  logic                       embed_rd_active_q;
+  logic [15:0]                embed_rd_beats_remaining_q;
+
+  function automatic logic [15:0] embed_beats_from_byte_count(
+    input logic [31:0] byte_count
+  );
+    logic [31:0] beats_32;
+    begin
+      if (byte_count == '0) begin
+        beats_32 = 32'd1;
+      end else begin
+        beats_32 = (byte_count + DMA_BEAT_BYTES - 1) / DMA_BEAT_BYTES;
+      end
+
+      if (beats_32 == '0) begin
+        embed_beats_from_byte_count = 16'd1;
+      end else if (beats_32 > 16'hffff) begin
+        embed_beats_from_byte_count = 16'hffff;
+      end else begin
+        embed_beats_from_byte_count = beats_32[15:0];
+      end
+    end
+  endfunction
+
   assign zero_desc = '0;
   assign zero_data = '0;
+  assign frontend_launch = start_pulse || embedding_start;
+  assign frontend_token_valid = decode_token_pending_q || prompt_token_valid;
+  assign frontend_token = decode_token_pending_q ? decode_token_q : prompt_token;
+  assign prompt_token_ready = frontend_token_ready && !decode_token_pending_q;
 
   axi_lite_ctrl_slave u_axi_lite_ctrl_slave (
     .ap_clk       (ap_clk),
@@ -274,9 +364,9 @@ module tinyllama_u55c_kernel_top (
     .command_info_valid_i     (command_info_valid),
     .prompt_read_done_i       (embed_done_pulse),
     .layer_pass_done_i        (layer_run_done),
-    .lm_head_done_i           (sim_lm_head_done_q),
-    .token_valid_i            (sim_token_valid_q),
-    .token_id_i               (sim_token_id_q),
+    .lm_head_done_i           (runtime_lm_head_done_pulse),
+    .token_valid_i            (runtime_token_fire_q),
+    .token_id_i               (runtime_token_fire_id_q),
     .stop_now_i               (stop_now_w),
     .stop_reason_i            (stop_reason_w),
     .error_valid_i            (prompt_error_valid),
@@ -301,8 +391,8 @@ module tinyllama_u55c_kernel_top (
 
   stop_condition_unit u_stop_condition_unit (
     .abort_req_i             (abort_req),
-    .emitted_token_valid_i   (sim_token_valid_q),
-    .emitted_token_id_i      (sim_token_id_q),
+    .emitted_token_valid_i   (runtime_token_fire_q),
+    .emitted_token_id_i      (runtime_token_fire_id_q),
     .generated_token_count_i (ctrl_generated_token_count),
     .max_new_tokens_i        (max_new_tokens),
     .eos_token_id_i          (eos_token_id),
@@ -334,27 +424,156 @@ module tinyllama_u55c_kernel_top (
   runtime_embedding_frontend u_runtime_embedding_frontend (
     .ap_clk               (ap_clk),
     .ap_rst_n             (ap_rst_n),
-    .launch_i             (start_pulse),
+    .launch_i             (frontend_launch),
     .embedding_base_addr_i(EMBEDDING_BASE_ADDR),
     .scale_meta_base_addr_i(EMBEDDING_SCALE_META_BASE_ADDR),
-    .token_valid_i        (prompt_token_valid),
-    .token_ready_o        (prompt_token_ready),
-    .token_i              (prompt_token),
-    .rd_desc_valid_o      (embed_rd_desc_valid),
-    .rd_desc_ready_i      (embed_rd_desc_ready),
-    .rd_desc_o            (embed_rd_desc),
-    .rd_data_valid_i      (embed_rd_data_valid),
-    .rd_data_ready_o      (embed_rd_data_ready),
-    .rd_data_i            (embed_rd_data),
+    .token_valid_i        (frontend_token_valid),
+    .token_ready_o        (frontend_token_ready),
+    .token_i              (frontend_token),
+    .rd_desc_valid_o      (frontend_rd_desc_valid),
+    .rd_desc_ready_i      (frontend_rd_desc_ready),
+    .rd_desc_o            (frontend_rd_desc),
+    .rd_data_valid_i      (frontend_rd_data_valid),
+    .rd_data_ready_o      (frontend_rd_data_ready),
+    .rd_data_i            (frontend_rd_data),
     .scale_valid_o        (embed_scale_valid),
-    .scale_ready_i        (1'b1),
+    .scale_ready_i        (embed_scale_ready),
     .scale_o              (embed_scale_bus),
     .act_valid_o          (embed_act_valid),
-    .act_ready_i          (1'b1),
+    .act_ready_i          (embed_act_ready),
     .act_o                (embed_act_bus),
     .busy_o               (embed_busy),
     .done_pulse_o         (embed_done_pulse)
   );
+
+  runtime_decoder_datapath u_runtime_decoder_datapath (
+    .ap_clk                  (ap_clk),
+    .ap_rst_n                (ap_rst_n),
+    .launch_i                (frontend_launch),
+    .abort_req_i             (abort_req),
+    .embed_scale_valid_i     (embed_scale_valid),
+    .embed_scale_ready_o     (embed_scale_ready),
+    .embed_scale_i           (embed_scale_bus),
+    .embed_act_valid_i       (embed_act_valid),
+    .embed_act_ready_o       (embed_act_ready),
+    .embed_act_i             (embed_act_bus),
+    .block_valid_i           (block_valid),
+    .block_start_i           (block_start),
+    .runtime_mode_i          (layer_runtime_mode),
+    .layer_id_i              (layer_id),
+    .block_id_i              (layer_block_id),
+    .q_head_id_i             (q_head_id),
+    .kv_head_id_i            (kv_head_id),
+    .context_valid_o         (decoder_context_valid),
+    .block_done_o            (decoder_block_done),
+    .final_scale_valid_o     (decoder_final_scale_valid),
+    .final_scale_ready_i     (decoder_final_scale_ready),
+    .final_scale_o           (decoder_final_scale_bus),
+    .final_act_valid_o       (decoder_final_act_valid),
+    .final_act_ready_i       (decoder_final_act_ready),
+    .final_act_o             (decoder_final_act_bus),
+    .final_hidden_done_pulse_o(decoder_final_hidden_done_pulse),
+    .busy_o                  (decoder_busy)
+  );
+
+  runtime_final_rmsnorm_tail u_runtime_final_rmsnorm_tail (
+    .ap_clk              (ap_clk),
+    .ap_rst_n            (ap_rst_n),
+    .launch_i            (frontend_launch),
+    .abort_req_i         (abort_req),
+    .gamma_base_addr_i   (FINAL_RMS_GAMMA_BASE_ADDR),
+    .output_scale_i      (FINAL_RMS_OUTPUT_SCALE_Q16),
+    .rd_desc_valid_o     (final_rms_rd_desc_valid),
+    .rd_desc_ready_i     (final_rms_rd_desc_ready),
+    .rd_desc_o           (final_rms_rd_desc),
+    .rd_data_valid_i     (final_rms_rd_data_valid),
+    .rd_data_ready_o     (final_rms_rd_data_ready),
+    .rd_data_i           (final_rms_rd_data),
+    .hidden_scale_valid_i(decoder_final_scale_valid),
+    .hidden_scale_ready_o(decoder_final_scale_ready),
+    .hidden_scale_i      (decoder_final_scale_bus),
+    .hidden_act_valid_i  (decoder_final_act_valid),
+    .hidden_act_ready_o  (decoder_final_act_ready),
+    .hidden_act_i        (decoder_final_act_bus),
+    .norm_scale_valid_o  (final_rms_scale_valid),
+    .norm_scale_ready_i  (final_rms_scale_ready),
+    .norm_scale_o        (final_rms_scale_bus),
+    .norm_act_valid_o    (final_rms_act_valid),
+    .norm_act_ready_i    (final_rms_act_ready),
+    .norm_act_o          (final_rms_act_bus),
+    .norm_done_pulse_o   (final_rms_done_pulse),
+    .busy_o              (final_rms_busy)
+  );
+
+  runtime_lm_head_tail u_runtime_lm_head_tail (
+    .ap_clk                (ap_clk),
+    .ap_rst_n              (ap_rst_n),
+    .launch_i              (frontend_launch),
+    .abort_req_i           (abort_req),
+    .start_i               (lm_head_start || argmax_start),
+    .lmhead_base_addr_i    (LM_HEAD_BASE_ADDR),
+    .rd_desc_valid_o       (lm_head_rd_desc_valid),
+    .rd_desc_ready_i       (lm_head_rd_desc_ready),
+    .rd_desc_o             (lm_head_rd_desc),
+    .rd_data_valid_i       (lm_head_rd_data_valid),
+    .rd_data_ready_o       (lm_head_rd_data_ready),
+    .rd_data_i             (lm_head_rd_data),
+    .hidden_scale_valid_i  (final_rms_scale_valid),
+    .hidden_scale_ready_o  (final_rms_scale_ready),
+    .hidden_scale_i        (final_rms_scale_bus),
+    .hidden_act_valid_i    (final_rms_act_valid),
+    .hidden_act_ready_o    (final_rms_act_ready),
+    .hidden_act_i          (final_rms_act_bus),
+    .hidden_done_pulse_i   (final_rms_done_pulse),
+    .lm_head_done_pulse_o  (runtime_lm_head_done_pulse),
+    .token_valid_o         (runtime_token_valid),
+    .token_ready_i         (runtime_token_ready),
+    .token_id_o            (runtime_token_id),
+    .token_logit_o         (runtime_token_logit),
+    .context_valid_o       (runtime_lm_context_valid),
+    .lm_head_busy_o        (runtime_lm_busy),
+    .argmax_busy_o         (runtime_argmax_busy),
+    .busy_o                ()
+  );
+
+  always_comb begin
+    embed_rd_sel_w = EMRD_NONE;
+    embed_rd_desc = '0;
+    if (frontend_rd_desc_valid) begin
+      embed_rd_sel_w = EMRD_FRONTEND;
+      embed_rd_desc = frontend_rd_desc;
+    end else if (final_rms_rd_desc_valid) begin
+      embed_rd_sel_w = EMRD_FINAL;
+      embed_rd_desc = final_rms_rd_desc;
+    end else if (lm_head_rd_desc_valid) begin
+      embed_rd_sel_w = EMRD_LM_HEAD;
+      embed_rd_desc = lm_head_rd_desc;
+    end
+  end
+
+  assign embed_rd_desc_valid = !embed_rd_active_q && (embed_rd_sel_w != EMRD_NONE);
+  assign frontend_rd_desc_ready = !embed_rd_active_q && embed_rd_desc_ready &&
+                                  (embed_rd_sel_w == EMRD_FRONTEND);
+  assign final_rms_rd_desc_ready = !embed_rd_active_q && embed_rd_desc_ready &&
+                                   (embed_rd_sel_w == EMRD_FINAL);
+  assign lm_head_rd_desc_ready = !embed_rd_active_q && embed_rd_desc_ready &&
+                                 (embed_rd_sel_w == EMRD_LM_HEAD);
+  assign frontend_rd_data_valid = embed_rd_active_q &&
+                                  (embed_rd_active_client_q == EMRD_FRONTEND) &&
+                                  embed_rd_data_valid;
+  assign final_rms_rd_data_valid = embed_rd_active_q &&
+                                   (embed_rd_active_client_q == EMRD_FINAL) &&
+                                   embed_rd_data_valid;
+  assign lm_head_rd_data_valid = embed_rd_active_q &&
+                                 (embed_rd_active_client_q == EMRD_LM_HEAD) &&
+                                 embed_rd_data_valid;
+  assign frontend_rd_data = embed_rd_data;
+  assign final_rms_rd_data = embed_rd_data;
+  assign lm_head_rd_data = embed_rd_data;
+  assign embed_rd_data_ready = embed_rd_active_q &&
+                               (((embed_rd_active_client_q == EMRD_FRONTEND) && frontend_rd_data_ready) ||
+                                ((embed_rd_active_client_q == EMRD_FINAL) && final_rms_rd_data_ready) ||
+                                ((embed_rd_active_client_q == EMRD_LM_HEAD) && lm_head_rd_data_ready));
 
   generated_token_writer u_generated_token_writer (
     .ap_clk                    (ap_clk),
@@ -362,9 +581,9 @@ module tinyllama_u55c_kernel_top (
     .start_i                   (token_writer_start),
     .generated_tokens_base_addr_i(generated_tokens_base_addr),
     .generated_tokens_capacity_i(generated_tokens_capacity),
-    .token_valid_i             (sim_token_valid_q),
-    .token_id_i                (sim_token_id_q),
-    .token_ready_o             (gen_writer_token_ready),
+    .token_valid_i             (runtime_token_valid),
+    .token_id_i                (runtime_token_id),
+    .token_ready_o             (runtime_token_ready),
     .busy_o                    (gen_writer_busy),
     .wr_desc_valid_o           (gen_wr_desc_valid),
     .wr_desc_ready_i           (gen_wr_desc_ready),
@@ -380,7 +599,7 @@ module tinyllama_u55c_kernel_top (
     .start_i           (runtime_layer_start),
     .abort_req_i       (abort_req),
     .runtime_mode_i    (ctrl_active_mode),
-    .block_done_i      (sim_block_done_q),
+    .block_done_i      (decoder_block_done),
     .busy_o            (layer_busy),
     .run_done_o        (layer_run_done),
     .layer_start_o     (per_layer_start),
@@ -487,9 +706,11 @@ module tinyllama_u55c_kernel_top (
       hw_current_block = layer_block_id;
     end else if (embed_busy || prompt_busy) begin
       hw_current_block = BLOCK_EMBED;
-    end else if (sim_lm_pending_q) begin
+    end else if (final_rms_busy || final_rms_scale_valid || final_rms_act_valid) begin
+      hw_current_block = BLOCK_FINAL_RMSNORM;
+    end else if (runtime_lm_busy) begin
       hw_current_block = BLOCK_LM_HEAD;
-    end else if (sim_token_pending_q || sim_token_valid_q) begin
+    end else if (runtime_argmax_busy || runtime_token_valid) begin
       hw_current_block = BLOCK_ARGMAX;
     end else begin
       hw_current_block = BLOCK_NONE;
@@ -498,30 +719,63 @@ module tinyllama_u55c_kernel_top (
 
   always_ff @(posedge ap_clk) begin
     if (!ap_rst_n) begin
-      sim_block_done_q   <= 1'b0;
-      sim_lm_head_done_q <= 1'b0;
-      sim_token_valid_q  <= 1'b0;
-      sim_token_id_q     <= '0;
-      sim_lm_pending_q   <= 1'b0;
-      sim_token_pending_q <= 1'b0;
+      embed_rd_active_q <= 1'b0;
+      embed_rd_active_client_q <= EMRD_NONE;
+      embed_rd_beats_remaining_q <= '0;
+      runtime_token_fire_q <= 1'b0;
+      runtime_token_fire_id_q <= '0;
+      decode_token_pending_q <= 1'b0;
+      decode_token_q <= '0;
       hw_last_token_id   <= '0;
     end else begin
-      sim_block_done_q   <= block_start;
-      sim_lm_head_done_q <= 1'b0;
-      sim_token_valid_q  <= 1'b0;
+      runtime_token_fire_q <= 1'b0;
 
-      if (lm_head_start) begin
-        sim_lm_pending_q    <= 1'b1;
-        sim_token_pending_q <= 1'b0;
-        sim_token_id_q      <= TOKEN_W'(32'd1000) + TOKEN_W'(ctrl_generated_token_count);
-      end else if (sim_lm_pending_q) begin
-        sim_lm_pending_q    <= 1'b0;
-        sim_lm_head_done_q  <= 1'b1;
-        sim_token_pending_q <= 1'b1;
-      end else if (sim_token_pending_q && gen_writer_token_ready) begin
-        sim_token_pending_q <= 1'b0;
-        sim_token_valid_q   <= 1'b1;
-        hw_last_token_id    <= sim_token_id_q;
+      if (start_pulse || abort_req) begin
+        embed_rd_active_q <= 1'b0;
+        embed_rd_active_client_q <= EMRD_NONE;
+        embed_rd_beats_remaining_q <= '0;
+        decode_token_pending_q <= 1'b0;
+      end else if (decode_token_pending_q && frontend_token_ready) begin
+        decode_token_pending_q <= 1'b0;
+      end
+
+      if (!embed_rd_active_q && embed_rd_desc_valid && embed_rd_desc_ready) begin
+        embed_rd_active_q <= 1'b1;
+        embed_rd_active_client_q <= embed_rd_sel_w;
+        embed_rd_beats_remaining_q <= embed_beats_from_byte_count(embed_rd_desc.byte_count);
+      end
+
+      if (embed_rd_active_q && embed_rd_data_valid && embed_rd_data_ready) begin
+        if (embed_rd_beats_remaining_q <= 16'd1) begin
+          embed_rd_active_q <= 1'b0;
+          embed_rd_active_client_q <= EMRD_NONE;
+          embed_rd_beats_remaining_q <= '0;
+        end else begin
+          embed_rd_beats_remaining_q <= embed_rd_beats_remaining_q - 1'b1;
+        end
+      end
+
+      if (runtime_token_valid && runtime_token_ready) begin
+        runtime_token_fire_q <= 1'b1;
+        runtime_token_fire_id_q <= runtime_token_id;
+        hw_last_token_id <= runtime_token_id;
+      end
+
+      if (runtime_token_fire_q && !stop_now_w) begin
+        decode_token_pending_q <= 1'b1;
+        decode_token_q.token_id <= runtime_token_fire_id_q;
+        decode_token_q.token_count <= COUNT_W'(prompt_token_count + ctrl_generated_token_count + COUNT_W'(1));
+        decode_token_q.tag.layer_id <= '0;
+        decode_token_q.tag.block_id <= BLOCK_EMBED;
+        decode_token_q.tag.gemm_mode <= GEMM_NONE;
+        decode_token_q.tag.tile_id <= TILE_ID_W'(prompt_token_count + ctrl_generated_token_count);
+        decode_token_q.tag.token_base <= POS_W'(prompt_token_count + ctrl_generated_token_count);
+        decode_token_q.tag.seq_count <= COUNT_W'(1);
+        decode_token_q.tag.q_head_id <= '0;
+        decode_token_q.tag.kv_head_id <= '0;
+        decode_token_q.tag.elem_count <= 16'd1;
+        decode_token_q.tag.is_last <= 1'b1;
+        decode_token_q.tag.is_partial <= 1'b1;
       end
 
       if (start_pulse) begin

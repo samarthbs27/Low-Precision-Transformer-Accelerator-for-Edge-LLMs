@@ -254,11 +254,23 @@ hardware implementation.
   - command beat fetch still comes from PC30 through `host_cmd_status_mgr.sv`
   - prompt-token list fetch still comes from PC30 through `prompt_token_reader.sv`
   - prefill launch is no longer treated as complete when prompt-token list
-    fetch alone finishes; the top-level now waits for completed embedding ingress
-    from `runtime_embedding_frontend.sv`
-  - the current top-level still uses deterministic layer/LM/token stubs after
-    embedding ingress, so this is the first real-inference closure slice rather
-    than full end-to-end inference
+    fetch alone finishes; the top-level waits for completed embedding ingress
+    from `runtime_embedding_frontend.sv` before starting layers
+  - non-stopping emitted decode tokens now flow through a held-valid feedback
+    mux into `runtime_embedding_frontend.sv`, and decode layers wait for that
+    relaunch ingress to complete before restarting
+  - the current top-level routes embedding outputs into
+    `runtime_decoder_datapath.sv`, which provides TinyLlama-scale per-block
+    completion timing plus the current deterministic `BLOCK_FINAL_RMSNORM`
+    stream
+  - the current top-level routes that block-driven deterministic final-hidden
+    stream into
+    `runtime_final_rmsnorm_tail.sv`, which fetches real final gamma and runs
+    `rmsnorm_wrapper.sv` before token selection
+  - the current top-level routes the post-RMSNorm stream into
+    `runtime_lm_head_tail.sv`, which wraps the real `lm_head_controller.sv`
+    and `argmax_reduction.sv`, fetches real `TENSOR_LM_HEAD` weights, and
+    drives the reused `shared_gemm_engine.sv`
 - Parallelism:
   - structural only; all system-level parallelism is created by child modules
     and overlapped DMA/compute pipelines.
@@ -295,13 +307,16 @@ hardware implementation.
   quantization into one runtime slice.
 - Inputs / buses:
   - `launch_i`
-  - token stream from `prompt_token_reader.sv` or a future decode-token mux
+  - token stream from `prompt_token_reader.sv` or the current decode-token
+    feedback mux in `tinyllama_u55c_kernel_top.sv`
   - normalized embed/meta read descriptor/data channel
 - Outputs / buses:
-  - `scale_bus` / `act_bus` embedding outputs for the future decoder datapath
+  - `scale_bus` / `act_bus` embedding outputs for
+    `runtime_decoder_datapath.sv`
   - one `done_pulse` when the current embedding sequence finishes
 - Concrete contract:
-  - on each runtime launch it first fetches one `TENSOR_SCALE_META` vector
+  - on each runtime launch or decode relaunch it first fetches one
+    `TENSOR_SCALE_META` vector
   - after scale fetch completes it accepts token traffic and issues one
     `TENSOR_EMBED` request per token
   - current canonical normalized-shell base addresses are:
@@ -312,6 +327,137 @@ hardware implementation.
 - Parallelism:
   - one scale fetch plus streamed row fetches, with `embedding_quantizer.sv`
     emitting one full `M_TILE x N_TILE` activation batch at a time.
+
+#### M00c. `runtime_decoder_datapath.sv`
+
+- Language: SystemVerilog RTL
+- Physical instances: 1
+- Purpose: First decoder-datapath integration helper. It consumes real
+  embedding ingress outputs, owns TinyLlama-scale per-block completion timing
+  for the reused layer controller, carries one FFN tile coherently through the
+  current `GATE -> UP -> SILU -> GLU_MUL -> DOWN` scaffold, now routes
+  `BLOCK_GATE`, `BLOCK_UP`, and `BLOCK_DOWN` through the real
+  `shared_gemm_engine.sv`, uses the real `silu_wrapper.sv` leaf on
+  `BLOCK_SILU`, uses the real `elementwise_mul.sv` leaf on `BLOCK_GLU_MUL`,
+  stages the current weighted-sum scaffold output, routes `BLOCK_O` through
+  the real `shared_gemm_engine.sv`, applies `BLOCK_RESIDUAL1` on the staged O
+  tile, mutates the captured hidden-state tiles through the remaining
+  deterministic block-local update path, and emits the accumulated final-hidden
+  stream while the real decoder/math blocks are still being integrated.
+- Inputs / buses:
+  - `launch_i`, `abort_req_i`
+  - embedding `scale_bus` / `act_bus` from `runtime_embedding_frontend.sv`
+  - block schedule from `layer_controller.sv`
+- Outputs / buses:
+  - `context_valid_o`
+  - `block_done_o`
+  - one `BLOCK_FINAL_RMSNORM` scale beat plus `D_MODEL / N_TILE = 64`
+    activation tiles
+  - `final_hidden_done_pulse_o`
+- Concrete contract:
+  - it requires one captured embedding scale beat plus 64 embedding activation
+    tiles before accepting layer-controller work
+  - each issued block receives a nontrivial deterministic completion latency so
+    the top-level no longer depends on a one-cycle block-done stub
+  - on each completed block, it selects one feature tile
+  - for the FFN chain:
+    - `BLOCK_GATE` and `BLOCK_UP` now route the selected hidden-state tile
+      through the real `shared_gemm_engine.sv` and requantize the resulting
+      INT32 accumulation into the staged FFN side tiles
+    - `BLOCK_SILU` now routes the anchor tile through the real
+      `silu_wrapper.sv` leaf and captures the emitted INT8 SiLU tile
+    - `BLOCK_GLU_MUL` now routes those staged tiles through the real
+      `elementwise_mul.sv` leaf and requantizes the product tile
+    - `BLOCK_DOWN` now routes the product tile through the real
+      `shared_gemm_engine.sv`, then applies the accumulated INT32 result
+      through the real `residual_add.sv` + `requantize_unit.sv` hidden-state
+      update path
+  - for the current attention-output chain:
+    - `BLOCK_WEIGHTED_SUM` now stages the deterministic attention-output tile
+      instead of writing it straight back into the hidden-state tile
+    - `BLOCK_O` now routes that staged attention tile through the real
+      `shared_gemm_engine.sv` and captures the requantized O-projection tile
+    - `BLOCK_RESIDUAL1` now applies that staged O tile back onto the hidden
+      state through the real `residual_add.sv` + `requantize_unit.sv` path
+  - the remaining blocks still derive deterministic block-specific update
+    vectors and apply them using the real `residual_add.sv` and
+    `requantize_unit.sv` blocks
+  - after the final block of layer 21 completes, it emits one final-hidden
+    scale beat and 64 activation tiles tagged as `BLOCK_FINAL_RMSNORM`
+- Parallelism:
+  - one block-completion engine plus one tile-serial FFN/mutation path and one
+    final-hidden output streamer; this is still a scaffold rather than the
+    final decoder math datapath.
+
+#### M00d. `runtime_final_rmsnorm_tail.sv`
+
+- Language: SystemVerilog RTL
+- Physical instances: 1
+- Purpose: Runtime final-RMSNorm integration helper. It fetches the final gamma
+  vector, applies `rmsnorm_wrapper.sv` to the current deterministic
+  block-driven final-hidden scaffold stream, and emits the post-RMSNorm
+  runtime stream for token selection.
+- Inputs / buses:
+  - `launch_i`, `abort_req_i`
+  - current final-hidden scale/activation stream from
+    `runtime_decoder_datapath.sv`
+  - normalized embed/meta read descriptor/data channel shared with
+    `runtime_embedding_frontend.sv`
+  - top-supplied output-scale contract for the current runtime scaffold
+- Outputs / buses:
+  - one final-gamma read descriptor stream
+  - post-RMSNorm `scale_bus` / `act_bus`
+  - `norm_done_pulse_o`
+  - runtime-visible busy status
+- Concrete contract:
+  - fetches one `TENSOR_FINAL_RMS_GAMMA` vector from the current canonical base
+    address `0x0000_0000_0800_0000`
+  - consumes the current deterministic `BLOCK_FINAL_RMSNORM` scale beat plus
+    64 activation tiles from `runtime_decoder_datapath.sv`
+  - runs the real `rmsnorm_wrapper.sv` before token selection
+  - the current runtime scaffold uses a stable dedicated output-scale source in
+    `tinyllama_u55c_kernel_top.sv` for the helper's `output_scale_i` contract
+  - do not source that contract from a live decoder bus; the long-term
+    replacement is a configured final-RMSNorm output-scale path
+- Parallelism:
+  - one final-gamma fetch plus one reused RMSNorm wrapper instance.
+
+#### M00e. `runtime_lm_head_tail.sv`
+
+- Language: SystemVerilog RTL
+- Physical instances: 1
+- Purpose: Runtime-tail integration helper. It consumes the current
+  post-RMSNorm runtime stream, wraps the real `lm_head_controller.sv` and
+  `argmax_reduction.sv`, and replaces the old LM/token stub path in the
+  runtime top-level.
+- Inputs / buses:
+  - `launch_i`, `abort_req_i`
+  - `start_i`
+  - current post-RMSNorm scale/activation stream from
+    `runtime_final_rmsnorm_tail.sv`
+- Outputs / buses:
+  - `lm_head_done_pulse_o`
+  - emitted token valid/ready handshake and token id/logit
+  - runtime-visible LM-head / argmax busy status
+- Concrete contract:
+  - captures the current post-RMSNorm scale beat plus activation stream from
+    `runtime_final_rmsnorm_tail.sv`
+  - defers the real `lm_head_controller.sv` launch until that context is fully
+    captured
+  - fetches one real `TENSOR_LM_HEAD` tile-group stream per
+    `VOCAB_TILE / N_TILE = 4` subgroup through
+    `embedding_lmhead_dma_reader.sv`
+  - feeds the captured final hidden-state row plus streamed INT8 weights into
+    the reused `shared_gemm_engine.sv`
+  - runs the real outer vocabulary loop across
+    `VOCAB_SIZE / VOCAB_TILE = 250` tiles
+  - the current integrated runtime token stream is still deterministic only
+    because `runtime_decoder_datapath.sv` continues to emit the upstream
+    deterministic block-driven decoder-state scaffold
+- Parallelism:
+  - one captured-context buffer, one real LM-head DMA reader, one reused
+    shared-GEMM instance, one real LM-head outer-loop controller, and one real
+    greedy argmax reducer.
 
 #### M01. `axi_lite_ctrl_slave.sv`
 
@@ -381,8 +527,10 @@ hardware implementation.
   - waits for `command_info_valid` before launching downstream runtime work
   - prefill launch pulses `prompt_read_start` and waits for
     `prompt_read_done` before starting layers
-  - decode-only launch skips prompt-read and starts layers immediately after
-    command decode
+  - decode-only launch skips prompt-read but still pulses `embedding_start` and
+    waits for embedding ingress completion before starting layers
+  - each non-stopping emitted decode token pulses `embedding_start` and returns
+    to the same ingress-complete wait state before the next layer pass
   - pulses `token_writer_start` once per launch before emitted-token writeback
   - pulses `lm_head_start` and `argmax_start` together after each completed
     layer pass that requires token selection
@@ -1053,6 +1201,22 @@ hardware implementation.
   - gamma chunk stream in `Q16.16`, fixed 32 elements per chunk
   - row count
   - feature count
+
+#### M37a. `rmsnorm_core_hls_ip.sv`
+
+- Language: SystemVerilog support model
+- Physical instances: 0 in the intended hardware image; 1 in local Icarus
+  runtime-integration simulations
+- Purpose: Repo-owned simulation model for the HLS-IP boundary consumed by
+  `rmsnorm_wrapper.sv` during local runtime integration.
+- Inputs / buses:
+  - same stream/handshake contract as the wrapped RMSNorm HLS IP
+- Outputs / buses:
+  - same stream/handshake contract as the wrapped RMSNorm HLS IP
+- Concrete contract:
+  - must remain compatible with `rmsnorm_wrapper.sv`
+  - is allowed to use simulation-oriented arithmetic for local regression
+  - is not, by itself, a new Vivado synthesis checkpoint
   - epsilon constant
 - Outputs / buses:
   - normalized chunk stream in `Q16.16`

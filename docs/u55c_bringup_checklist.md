@@ -187,8 +187,27 @@ iverilog -g2012 -o sim/tb_kernel_top_smoke.vvp \
   rtl/control/layer_controller.sv \
   rtl/control/stop_condition_unit.sv \
   rtl/memory/hbm_port_router.sv \
+  rtl/memory/embedding_lmhead_dma_reader.sv \
   rtl/memory/prompt_token_reader.sv \
   rtl/memory/generated_token_writer.sv \
+  rtl/compute/embedding_lookup.sv \
+  rtl/compute/embedding_quantizer.sv \
+  rtl/compute/residual_add.sv \
+  rtl/compute/requantize_unit.sv \
+  rtl/compute/elementwise_mul.sv \
+  rtl/compute/mac_lane.sv \
+  rtl/compute/accumulator_bank.sv \
+  rtl/compute/shared_gemm_engine.sv \
+  rtl/compute/lm_head_controller.sv \
+  rtl/compute/argmax_reduction.sv \
+  rtl/nonlinear/rmsnorm_core_hls_ip.sv \
+  rtl/nonlinear/rmsnorm_wrapper.sv \
+  rtl/nonlinear/silu_core_hls_ip.sv \
+  rtl/nonlinear/silu_wrapper.sv \
+  rtl/top/runtime_embedding_frontend.sv \
+  rtl/top/runtime_decoder_datapath.sv \
+  rtl/top/runtime_final_rmsnorm_tail.sv \
+  rtl/top/runtime_lm_head_tail.sv \
   rtl/top/tinyllama_u55c_kernel_top.sv \
   rtl/tb/tb_kernel_top_smoke.sv
 vvp sim/tb_kernel_top_smoke.vvp
@@ -200,6 +219,7 @@ iverilog -g2012 -o sim/tb_kernel_top_acceptance.vvp \
   rtl/common/tinyllama_bus_pkg.sv \
   rtl/common/stream_fifo.sv \
   rtl/common/skid_buffer.sv \
+  rtl/common/descriptor_fifo.sv \
   rtl/control/axi_lite_ctrl_slave.sv \
   rtl/control/kernel_reg_file.sv \
   rtl/control/host_cmd_status_mgr.sv \
@@ -207,8 +227,27 @@ iverilog -g2012 -o sim/tb_kernel_top_acceptance.vvp \
   rtl/control/layer_controller.sv \
   rtl/control/stop_condition_unit.sv \
   rtl/memory/hbm_port_router.sv \
+  rtl/memory/embedding_lmhead_dma_reader.sv \
   rtl/memory/prompt_token_reader.sv \
   rtl/memory/generated_token_writer.sv \
+  rtl/compute/embedding_lookup.sv \
+  rtl/compute/embedding_quantizer.sv \
+  rtl/compute/residual_add.sv \
+  rtl/compute/requantize_unit.sv \
+  rtl/compute/elementwise_mul.sv \
+  rtl/compute/mac_lane.sv \
+  rtl/compute/accumulator_bank.sv \
+  rtl/compute/shared_gemm_engine.sv \
+  rtl/compute/lm_head_controller.sv \
+  rtl/compute/argmax_reduction.sv \
+  rtl/nonlinear/rmsnorm_core_hls_ip.sv \
+  rtl/nonlinear/rmsnorm_wrapper.sv \
+  rtl/nonlinear/silu_core_hls_ip.sv \
+  rtl/nonlinear/silu_wrapper.sv \
+  rtl/top/runtime_embedding_frontend.sv \
+  rtl/top/runtime_decoder_datapath.sv \
+  rtl/top/runtime_final_rmsnorm_tail.sv \
+  rtl/top/runtime_lm_head_tail.sv \
   rtl/top/tinyllama_u55c_kernel_top.sv \
   rtl/tb/tb_kernel_top_acceptance.sv
 vvp sim/tb_kernel_top_acceptance.vvp
@@ -220,6 +259,7 @@ iverilog -g2012 -o sim/tb_shell_wrapper_smoke.vvp \
   rtl/common/tinyllama_bus_pkg.sv \
   rtl/common/stream_fifo.sv \
   rtl/common/skid_buffer.sv \
+  rtl/common/descriptor_fifo.sv \
   rtl/control/axi_lite_ctrl_slave.sv \
   rtl/control/kernel_reg_file.sv \
   rtl/control/host_cmd_status_mgr.sv \
@@ -227,8 +267,27 @@ iverilog -g2012 -o sim/tb_shell_wrapper_smoke.vvp \
   rtl/control/layer_controller.sv \
   rtl/control/stop_condition_unit.sv \
   rtl/memory/hbm_port_router.sv \
+  rtl/memory/embedding_lmhead_dma_reader.sv \
   rtl/memory/prompt_token_reader.sv \
   rtl/memory/generated_token_writer.sv \
+  rtl/compute/embedding_lookup.sv \
+  rtl/compute/embedding_quantizer.sv \
+  rtl/compute/residual_add.sv \
+  rtl/compute/requantize_unit.sv \
+  rtl/compute/elementwise_mul.sv \
+  rtl/compute/mac_lane.sv \
+  rtl/compute/accumulator_bank.sv \
+  rtl/compute/shared_gemm_engine.sv \
+  rtl/compute/lm_head_controller.sv \
+  rtl/compute/argmax_reduction.sv \
+  rtl/nonlinear/rmsnorm_core_hls_ip.sv \
+  rtl/nonlinear/rmsnorm_wrapper.sv \
+  rtl/nonlinear/silu_core_hls_ip.sv \
+  rtl/nonlinear/silu_wrapper.sv \
+  rtl/top/runtime_embedding_frontend.sv \
+  rtl/top/runtime_decoder_datapath.sv \
+  rtl/top/runtime_final_rmsnorm_tail.sv \
+  rtl/top/runtime_lm_head_tail.sv \
   rtl/top/tinyllama_u55c_kernel_top.sv \
   rtl/top/tinyllama_u55c_shell_wrapper.sv \
   rtl/tb/tb_shell_wrapper_smoke.sv

@@ -24,11 +24,27 @@ The implementation strategy is reuse-heavy:
 The current repo frontier is the first post-Phase-9 real-inference closure
 slice:
 
-- `runtime_embedding_frontend.sv` now performs real prefill embedding ingress
+- `runtime_embedding_frontend.sv` now performs real prefill and decode-token
+  embedding ingress
+- `runtime_decoder_datapath.sv` now consumes those embedding outputs and drives
+  TinyLlama-scale block completion across all 22 layers, including a coherent
+  FFN side chain that now uses the real `shared_gemm_engine.sv` on
+  `BLOCK_GATE`, `BLOCK_UP`, and `BLOCK_DOWN`, the real `silu_wrapper.sv` leaf
+  on `BLOCK_SILU`, the real `elementwise_mul.sv` leaf on `BLOCK_GLU_MUL`, and
+  a coherent `BLOCK_WEIGHTED_SUM -> BLOCK_O -> BLOCK_RESIDUAL1` attention
+  output chain where `BLOCK_O` now also uses the real
+  `shared_gemm_engine.sv`
+- `runtime_final_rmsnorm_tail.sv` now fetches real final RMSNorm gamma and
+  runs the real `rmsnorm_wrapper.sv` inside the runtime top-level
+- `runtime_lm_head_tail.sv` now wraps the real `lm_head_controller.sv`,
+  `shared_gemm_engine.sv`, and `argmax_reduction.sv` on top of that
+  post-RMSNorm stream
 - `tinyllama_u55c_kernel_top.sv` waits for completed embedding ingress before
-  launching the reused layer path
-- the decoder/final-RMS/LM-head/argmax path is still being integrated, so the
-  top-level is not yet a true token-generating TinyLlama datapath
+  launching or relaunching the reused layer path
+- the top-level now uses the real final-RMSNorm wrapper plus the real
+  LM-head DMA/shared-GEMM/controller/argmax tail, but the decoder's current
+  final-hidden stream is still a deterministic scaffold rather than the final
+  math path
 
 ---
 
@@ -126,11 +142,15 @@ Project/
       argmax_reduction.sv
       debug_capture_mux.sv
     nonlinear/
+      rmsnorm_core_hls_ip.sv
       rmsnorm_wrapper.sv
       softmax_wrapper.sv
       silu_wrapper.sv
     top/
       runtime_embedding_frontend.sv
+      runtime_decoder_datapath.sv
+      runtime_final_rmsnorm_tail.sv
+      runtime_lm_head_tail.sv
       tinyllama_u55c_kernel_top.sv
       tinyllama_u55c_shell_wrapper.sv
     tb/
@@ -170,6 +190,9 @@ Project/
       tb_decoder_layer_smoke.sv
       tb_prefill_decode_smoke.sv
       tb_runtime_embedding_frontend.sv
+      tb_runtime_decoder_datapath.sv
+      tb_runtime_final_rmsnorm_tail.sv
+      tb_runtime_lm_head_tail.sv
       tb_kernel_top_smoke.sv
       tb_kernel_top_acceptance.sv
       tb_shell_wrapper_smoke.sv
@@ -310,33 +333,78 @@ Project/
   fixtures under `sim/golden_traces/phase9/rtl/`.
 - Post-Phase-9 real inference closure has started:
   - `rtl/top/runtime_embedding_frontend.sv` now fetches real embedding-output
-    scale metadata plus real embedding rows during prefill
+    scale metadata plus real embedding rows during prefill and decode relaunch
+- `rtl/top/runtime_decoder_datapath.sv` now consumes those embedding outputs,
+    drives TinyLlama-scale block completion across all 22 layers, carries one
+    tile coherently through `GATE -> UP -> SILU -> GLU_MUL -> DOWN`, now uses
+    the real `shared_gemm_engine.sv` on `BLOCK_GATE`, `BLOCK_UP`, and
+    `BLOCK_DOWN`, the real `silu_wrapper.sv` leaf on `BLOCK_SILU`, the real
+    `elementwise_mul.sv` leaf on `BLOCK_GLU_MUL`, stages the synthetic
+    weighted-sum output, routes `BLOCK_O` through the real
+    `shared_gemm_engine.sv`, applies `BLOCK_RESIDUAL1` on that staged O tile,
+    and emits the accumulated final-hidden stream at the
+    `BLOCK_FINAL_RMSNORM` boundary
+  - `rtl/top/runtime_final_rmsnorm_tail.sv` now fetches real final RMSNorm
+    gamma, runs the real `rmsnorm_wrapper.sv`, and turns that stream into a
+    post-RMSNorm runtime activation path
+  - `rtl/top/runtime_lm_head_tail.sv` now consumes that post-RMSNorm stream,
+    fetches real `TENSOR_LM_HEAD` weights, runs the reused
+    `shared_gemm_engine.sv`, and then drives the real
+    `lm_head_controller.sv` + `argmax_reduction.sv` path
   - `rtl/top/tinyllama_u55c_kernel_top.sv` now gates prefill completion on
-    finished embedding ingress rather than only prompt-token fetch
+    finished embedding ingress rather than only prompt-token fetch, and loops
+    non-stopping emitted tokens back through the same ingress path before each
+    decode pass
+  - the current normalized-shell runtime harness now uses:
+    - embedding rows at `0x0000_0000_1000_0000`
+    - embedding-output scale metadata at `0x0000_0000_0400_0000`
+    - final RMSNorm gamma at `0x0000_0000_0800_0000`
+    - LM-head weights at `0x0000_0000_2000_0000`
   - `rtl/compute/embedding_quantizer.sv` now uses the current vendor-hardened
     microarchitecture: quantize one `N_TILE = 32` row-local feature slice per
     cycle during ingest, buffer INT8 feature tiles, then assemble the emitted
     512-lane batch tiles
 - Current local regression frontier after that rework is green:
+  - `tb_rmsnorm_wrapper.sv`
   - `tb_embedding_quantizer.sv`
+  - `tb_elementwise_mul.sv`
+  - `tb_lm_head_controller.sv`
+  - `tb_argmax_reduction.sv`
   - `tb_runtime_embedding_frontend.sv`
+  - `tb_runtime_decoder_datapath.sv`
+  - `tb_runtime_final_rmsnorm_tail.sv`
+  - `tb_runtime_lm_head_tail.sv`
   - `tb_kernel_top_smoke.sv`
   - `tb_kernel_top_acceptance.sv`
   - `tb_shell_wrapper_smoke.sv`
+- the fresh top-level runtime proofs for the current heavier decoder slice are
+  now captured under:
+  - `sim/logs/xsim_tb_kernel_top_smoke_*`
+  - `sim/logs/xsim_tb_kernel_top_acceptance_*`
+  - `sim/logs/xsim_tb_shell_wrapper_smoke_*`
+  because the added projection-GEMM work makes the full top-level benches
+  impractically slow under Icarus
 - Current Vivado synthesis checkpoints are also materially better:
   - `embedding_quantizer.sv` synthesizes cleanly as a leaf top
   - `runtime_embedding_frontend.sv` synthesizes cleanly as the next parent
   - `tinyllama_u55c_kernel_top.sv` synthesizes cleanly as the current runtime
     top
-  - the current shell-wrapper rerun after this slice is still pending
+  - the new `runtime_final_rmsnorm_tail.sv` and `runtime_lm_head_tail.sv`
+    runtime slices still need their own Vivado checkpoints
+  - `rtl/nonlinear/rmsnorm_core_hls_ip.sv` is currently a repo-owned local
+    simulation model for Icarus, not a new vendor-synthesis milestone
 - `docs/` now describe the full TinyLlama prefill/decode accelerator that the project is building toward.
 
-The repo now contains hardened production modules through the first concrete
-post-Phase-9 real-inference closure slice. The next milestone is the
-integrated decoder datapath: replace the current synthetic block-completion
-path, then wire final RMSNorm, real LM head, and real argmax into
-`tinyllama_u55c_kernel_top.sv`. The raw `m_axi_pc00..pc31` wrapper and the
-full Vitis/platform packaging flow remain the outer follow-on step after that.
+The repo now contains hardened production modules through the current
+post-Phase-9 decoder-closure slice, including the decoder-datapath scaffold
+that replaced the old one-cycle block-completion stub, routes the FFN-side
+`GATE`, `UP`, `SILU`, `GLU_MUL`, and `DOWN` blocks through the real projection
+and nonlinear leaves, and feeds the new runtime final-RMSNorm helper that sits
+in front of token selection. The next milestone is replacing the remaining
+deterministic attention-side and residual-side decoder scaffold with the actual
+shared decoder tail that feeds the now-real runtime LM-head DMA/shared-GEMM
+path. The raw `m_axi_pc00..pc31` wrapper and the full Vitis/platform packaging
+flow remain the outer follow-on step after that.
 
 One practical note: the production RTL we are writing is intended to be
 synthesizable, but a passing Icarus smoke test is only the first gate. The

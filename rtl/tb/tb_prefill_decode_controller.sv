@@ -197,6 +197,21 @@ module tb_prefill_decode_controller;
     end
   endtask
 
+  task automatic wait_for_embedding_launch;
+    int unsigned wait_cycles;
+    begin
+      wait_cycles = 0;
+      while (!embedding_start) begin
+        @(negedge clk);
+        wait_cycles++;
+        if (wait_cycles > 64) begin
+          $error("controller timeout waiting for embedding_start");
+          $finish;
+        end
+      end
+    end
+  endtask
+
   task automatic wait_for_done_reason(
     input stop_reason_e expected_reason
   );
@@ -317,8 +332,8 @@ module tb_prefill_decode_controller;
     @(negedge clk);
     prompt_read_done <= 1'b1;
     wait_for_layer_launch();
-    if (!embedding_start) begin
-      $error("controller expected embedding_start with first layer launch");
+    if (embedding_start) begin
+      $error("controller should not repulse embedding_start when prefill ingress completes");
       $finish;
     end
     @(negedge clk);
@@ -335,6 +350,17 @@ module tb_prefill_decode_controller;
       $error("controller expected decode-active transition after first token");
       $finish;
     end
+
+    wait_for_embedding_launch();
+    if (runtime_layer_start) begin
+      $error("controller should wait for decode embedding ingress before relaunching layers");
+      $finish;
+    end
+    @(negedge clk);
+    prompt_read_done <= 1'b1;
+    wait_for_layer_launch();
+    @(negedge clk);
+    prompt_read_done <= 1'b0;
 
     drive_layer_pass();
     emit_token(32'd2);
@@ -358,11 +384,16 @@ module tb_prefill_decode_controller;
     @(negedge clk);
     start <= 1'b0;
 
-    wait_for_layer_launch();
-    if (!busy || !decode_active || !token_writer_start) begin
+    wait_for_embedding_launch();
+    if (!busy || !decode_active || !token_writer_start || prompt_read_start) begin
       $error("decode-only launch expected busy decode-active controller with writer start");
       $finish;
     end
+    @(negedge clk);
+    prompt_read_done <= 1'b1;
+    wait_for_layer_launch();
+    @(negedge clk);
+    prompt_read_done <= 1'b0;
 
     begin : abort_wait
       int unsigned wait_cycles;
@@ -394,7 +425,12 @@ module tb_prefill_decode_controller;
     @(negedge clk);
     start <= 1'b0;
 
+    wait_for_embedding_launch();
+    @(negedge clk);
+    prompt_read_done <= 1'b1;
     wait_for_layer_launch();
+    @(negedge clk);
+    prompt_read_done <= 1'b0;
     if (!busy || !decode_active) begin
       $error("max-token scenario expected busy decode-active controller");
       $finish;

@@ -89,13 +89,19 @@ Design documentation for the TinyLlama U55C FPGA inference accelerator.
 - Quantization: INT8 GEMMs with INT32 accumulation; RMSNorm, RoPE, softmax, and final RMSNorm stay higher precision
 - Memory model: U55C HBM stores weights, KV cache, and debug buffers; BRAM/URAM hold active tiles and partial sums
 - Current verified implementation frontier: Phases 0 through 9 plus the first
-  post-Phase-9 real-inference closure slice
+  post-Phase-9 real-inference closure slice, including the runtime decoder
+  scaffold, runtime final-RMSNorm helper, and runtime LM-head tail
 - Current Vivado synthesis frontier: `embedding_quantizer`,
   `runtime_embedding_frontend`, and `tinyllama_u55c_kernel_top` now synthesize
   cleanly after the quantizer hardening rework
-- Current top-level caveat: the kernel top still does not consume the emitted
-  embedding activation/scale payloads downstream, so present kernel-top
-  utilization underreports the eventual full-inference datapath cost
+- Current top-level caveat: the kernel top still does not include the real
+  shared decoder final-hidden path yet; the current runtime top now includes a
+  real final-RMSNorm helper plus the real LM-head DMA/shared-GEMM/controller/
+  argmax tail, and the decoder helper now includes the real `BLOCK_SILU`
+  leaf through `silu_wrapper.sv` plus the real `BLOCK_GLU_MUL` leaf through
+  `elementwise_mul.sv`, but the upstream final-hidden source is still a
+  deterministic block-driven scaffold overall, so present kernel-top
+  utilization still underreports the eventual full-inference compute cost
 
 ---
 

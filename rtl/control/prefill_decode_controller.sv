@@ -114,8 +114,7 @@ module prefill_decode_controller (
               state_q             <= CTRL_WAIT_PROMPT;
             end else begin
               embedding_start_o <= 1'b1;
-              layer_start_o     <= 1'b1;
-              state_q           <= CTRL_RUN_LAYERS;
+              state_q           <= CTRL_WAIT_PROMPT;
             end
           end
         end
@@ -131,7 +130,6 @@ module prefill_decode_controller (
             done_pulse_o  <= 1'b1;
             state_q       <= CTRL_DONE;
           end else if (prompt_read_done_i) begin
-            embedding_start_o <= 1'b1;
             layer_start_o     <= 1'b1;
             state_q           <= CTRL_RUN_LAYERS;
           end
@@ -195,8 +193,7 @@ module prefill_decode_controller (
             end else begin
               active_mode_q     <= MODE_DECODE;
               embedding_start_o <= 1'b1;
-              layer_start_o     <= 1'b1;
-              state_q           <= CTRL_RUN_LAYERS;
+              state_q           <= CTRL_WAIT_PROMPT;
             end
           end
         end
