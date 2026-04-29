@@ -1,7 +1,3 @@
-# Claude Code context
-CLAUDE.md
-AGENTS.md
-
 # Docs — internal/working files
 docs/Milestone2.docx
 docs/array_architecture.txt
@@ -36,7 +32,7 @@ sim/golden_traces/
 /dfx_runtime.txt
 .Xil/
 
-# Claude Code internal directory (CLAUDE.md is separately ignored above)
+# Claude Code internal directory
 .claude/
 
 # Java HotSpot crash dumps from Vivado/XSIM

@@ -13,9 +13,11 @@ module plan.
 
 ---
 
-## 1. Fixed Architectural Constants
+## 1. Architectural Constants
 
-These values are treated as fixed for the first implementation:
+Model-geometry and protocol constants are treated as fixed. The engine-width
+constants (`GEMM_LANES`, `M_TILE`, `VOCAB_TILE`) have a target profile and a
+current synthesized/hardware profile.
 
 - `MODEL_ID = TinyLlama/TinyLlama-1.1B-Chat-v1.0`
 - `N_LAYERS = 22`
@@ -33,7 +35,8 @@ These values are treated as fixed for the first implementation:
 - `ACC_W = 32`
 - `TOKEN_W = 32`
 - `SCALE_W = 32`
-- `GEMM_LANES = 512`
+- `GEMM_LANES (target) = 512`
+- `GEMM_LANES (current synth/hw profile) = 64`
 - `HBM_PC_COUNT = 32`
 - `HBM_ADDR_W = 64`
 - `HBM_SHELL_DATA_W = platform-defined AXI width`
@@ -45,12 +48,14 @@ These values are treated as fixed for the first implementation:
 - `TILE_BUFFER_BANKS = 16`
 - `BANK_SLICE_INT8 = 32`
 - `BANK_SLICE_INT32 = 8`
-- `M_TILE = 16`
+- `M_TILE (target) = 16`
+- `M_TILE (current synth/hw profile) = 2`
 - `N_TILE = 32`
 - `K_TILE = 64`
 - `SCORE_Q_TILE = 16`
 - `SCORE_K_TILE = 64`
-- `VOCAB_TILE = 128`
+- `VOCAB_TILE (target) = 128`
+- `VOCAB_TILE (current synth/hw profile) = 64`
 - `HEAD_GROUP_PAR = 1`
 - `FIXED_POINT_FMT = Q16.16`
 
@@ -60,6 +65,9 @@ Notes:
 - All 22 decoder layers use the same physical decoder-layer engine.
 - All GEMM-heavy stages reuse the same physical shared GEMM engine.
 - Token selection is greedy argmax only in the initial implementation.
+- The current profile exists because Vivado 2022.1 crashes during global
+  synthesis at the 512-lane packed-struct bus widths; 64 lanes keeps synthesis
+  and hardware bring-up unblocked.
 
 ---
 
@@ -450,7 +458,7 @@ hardware implementation.
   - feeds the captured final hidden-state row plus streamed INT8 weights into
     the reused `shared_gemm_engine.sv`
   - runs the real outer vocabulary loop across
-    `VOCAB_SIZE / VOCAB_TILE = 250` tiles
+    `VOCAB_SIZE / VOCAB_TILE` tiles (250 target, 500 current)
   - the current integrated runtime token stream is still deterministic only
     because `runtime_decoder_datapath.sv` continues to emit the upstream
     deterministic block-driven decoder-state scaffold
@@ -825,10 +833,10 @@ hardware implementation.
   - `act_bus` to activation buffers
 - Concrete contract:
   - consumes fully assembled FP16 embedding rows from `embedding_lookup.sv`
-  - batches up to `M_TILE = 16` rows before emission
+  - batches up to `M_TILE` rows before emission (target 16, current 2)
   - quantizes one `N_TILE = 32`-element feature slice per cycle while ingesting
     each row, then buffers the resulting INT8 feature tiles per row/batch slot
-  - the output path assembles the emitted `512`-lane tile only from buffered
+  - the output path assembles the emitted `GEMM_LANES`-lane tile only from buffered
     INT8 row slices; it does not perform a `512`-way divide/modulo fanout
   - one batch emits:
     - one scale vector tagged for `BLOCK_EMBED`
@@ -836,7 +844,7 @@ hardware implementation.
   - lane packing is row-major over the current embedding batch:
     `lane = row_local * N_TILE + col_local`
   - scale entry selection is `row_local = lane / N_TILE`, so each 32-lane row
-    slice in the `16 x 32` batch tile consumes one scale-vector entry
+    slice in the `M_TILE x N_TILE` batch tile consumes one scale-vector entry
   - `tile_id` is the feature-tile index `0..63`
   - `token_base` is the first token position in the emitted batch
   - `seq_count` is the number of rows in the emitted batch
@@ -1110,17 +1118,17 @@ hardware implementation.
   - GEMM schedule to `gemm_op_scheduler.sv`
   - partial-logit streams to `argmax_reduction.sv`
 - Concrete contract:
-  - `gemm_op_scheduler.sv` handles exactly one `VOCAB_TILE = 128` LM-head pass
-    per `lm_head_only` launch
+  - `gemm_op_scheduler.sv` handles exactly one `VOCAB_TILE` LM-head pass
+    per `lm_head_only` launch (target 128, current 64)
   - `lm_head_controller.sv` owns the outer vocabulary loop and issues
-    `VOCAB_SIZE / VOCAB_TILE = 250` scheduler launches per token
+    `VOCAB_SIZE / VOCAB_TILE` scheduler launches per token (250 target, 500 current)
   - the captured final hidden-state tile and its scale metadata remain stable
-    for the full 250-tile sweep
+    for the full `VOCAB_SIZE / VOCAB_TILE` sweep
   - forwarded partial logits are retagged with:
     - `block_id = BLOCK_LM_HEAD`
     - `gemm_mode = GEMM_LM_HEAD`
     - `tile_id = vocab_tile_idx`
-    - `elem_count = 128`
+    - `elem_count = VOCAB_TILE`
     - `is_last = 1` only on the final vocab tile
 - Parallelism:
   - tiled processing across vocab tiles
@@ -1141,7 +1149,7 @@ hardware implementation.
 - Concrete contract:
   - reduction is performed across the full fixed-vocabulary sweep emitted by
     `lm_head_controller.sv`
-  - `tile_id` selects the outer `VOCAB_TILE = 128` slice and lane `0..127`
+  - `tile_id` selects the outer `VOCAB_TILE` slice and lane `0..(VOCAB_TILE-1)`
     selects token offsets inside that slice
   - `elem_count` is clamped to `VOCAB_TILE`
   - if two logits are exactly equal, the lower token id wins the tie-break
@@ -1456,10 +1464,9 @@ These notes affect the design immediately because they determine:
 
 ### 8.4 Tile Geometry And Edge-Tile Handling
 
-- The shared GEMM engine tile tuple is fixed to:
-  - `M_TILE = 16`
-  - `N_TILE = 32`
-  - `K_TILE = 64`
+- The shared GEMM engine tile tuple is:
+  - target profile: `M_TILE = 16`, `N_TILE = 32`, `K_TILE = 64` (`GEMM_LANES = 512`)
+  - current synth/hw profile: `M_TILE = 2`, `N_TILE = 32`, `K_TILE = 64` (`GEMM_LANES = 64`)
 - Attention-score tiling is fixed to:
   - `SCORE_Q_TILE = 16`
   - `SCORE_K_TILE = 64`
@@ -1468,8 +1475,9 @@ These notes affect the design immediately because they determine:
 - RoPE head-slice tiling is fixed to:
   - `ROPE_CHUNK_TOKENS = 8`
   - `HEAD_DIM = 64`
-- LM-head vocabulary processing is fixed to:
-  - `VOCAB_TILE = 128`
+- LM-head vocabulary processing uses:
+  - target profile: `VOCAB_TILE = 128`
+  - current synth/hw profile: `VOCAB_TILE = 64`
 - Prefill input tiling is fixed to `SEQ_TILE = 64`.
 - Decode uses query length `1`, but the same hardware path is used with masked
   partial tiles.
@@ -1497,8 +1505,8 @@ These notes affect the design immediately because they determine:
   - bank 2 -> lanes 64..95
   - ...
   - bank 15 -> lanes 480..511
-- A full 512-lane vector read is therefore one parallel access across all 16
-  banks.
+- A full `GEMM_LANES`-lane vector read spans `GEMM_LANES/32` banks (target: 16
+  banks at 512 lanes; current synth/hw profile: 2 banks at 64 lanes).
 - Activation, weight, KV, score, and LM-head buffers use physically separate
   bank groups. They do not share banks.
 - The scheduler never issues two accesses to the same bank of the same buffer
@@ -1713,9 +1721,8 @@ The following choices are now fixed and no longer treated as open items:
    - Width conversion is implemented inside `hbm_port_router.sv`.
 
 2. Shared GEMM tile tuple
-   - `M_TILE = 16`
-   - `N_TILE = 32`
-   - `K_TILE = 64`
+   - target profile: `M_TILE = 16`, `N_TILE = 32`, `K_TILE = 64` (`GEMM_LANES = 512`)
+   - current synth/hw profile: `M_TILE = 2`, `N_TILE = 32`, `K_TILE = 64` (`GEMM_LANES = 64`)
 
 3. Embedding-table storage format
    - Token embeddings are stored in HBM as FP16 row-major vectors.

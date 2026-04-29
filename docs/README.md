@@ -100,6 +100,9 @@ Design documentation for the TinyLlama U55C FPGA inference accelerator.
   clean); 512-lane synthesis blocked by Vivado 2022.1 NDup::dupNameType crash
   on ACC_BUS_W≥16K-bit packed structs (tool limitation, not RTL bug); design
   correctness at 512 lanes validated by simulation
+  - Note: `synth/out/` in this repo contains the earlier milestone synthesis
+    reports (job 51905999, LUTs 91.71%). The job 51963647 reports are stored on
+    SOL; the headline numbers are captured here for reporting.
 - Hardware execution frontier: U55C blocked by shell mismatch
   (`xdma_base_2` vs `xdma_3`); U280 available on SOL via Vitis v++ flow
   (platform `xilinx_u280_gen3x16_xdma_1_202211_1`); HLS kernels

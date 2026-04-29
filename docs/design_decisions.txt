@@ -1,6 +1,6 @@
 DESIGN DECISIONS - TinyLlama U55C Inference Accelerator
 =======================================================
-Last updated: 2026-04-13
+Last updated: 2026-04-28
 Author: Samarth (Dataflow, Tiling, Control)
 
 This file tracks the current architecture decisions for the post-Phase-1
@@ -99,8 +99,8 @@ A8. Sequence support and masking
   Decode uses query_len=1 and key_len=cache_len+1.
   Softmax is therefore a real sequence-length-dependent block, not a permanent
   passthrough stage.
-  Because the production datapath is 512 lanes wide, the score-mask path is
-  chunked as 8 query rows x 64 key columns per cycle.
+  Because the score/mask logical chunk is fixed to 8 query rows x 64 key columns
+  (512 score elements), the score-mask path is chunked at that granularity.
   The fixed score chunk constants are:
     - SCORE_ROWS_PER_CHUNK = 8
     - SCORE_K_TILE = 64
@@ -140,7 +140,9 @@ A10. Quantization scale policy
   Activation quantization: static per-tensor scales per block output.
   RTL-visible scale payload format: unsigned Q16.16 multipliers.
   Requantization scale distribution: one scale entry per 32-lane bank slice.
-  A full 512-lane activation tile therefore consumes 16 scale entries.
+  A full `GEMM_LANES`-lane activation tile therefore consumes `GEMM_LANES/32`
+  scale entries (target: 16 entries at 512 lanes; current synth/hw profile: 2
+  entries at 64 lanes).
   Any Q16.16-to-INT8 quantization path divides the Q16.16 value by the stored
   unsigned Q16.16 scale payload, then applies round-to-nearest-even and clamp.
   In `embedding_quantizer.sv`, the active scale entry is selected by
@@ -148,7 +150,7 @@ A10. Quantization scale policy
   `M_TILE x N_TILE` batch tile consumes exactly one scale-vector entry.
   The embedding quantizer microarchitecture is fixed to quantize one
   `N_TILE = 32`-element feature slice per cycle, buffer the resulting INT8
-  tiles per row, and only assemble the full `512`-lane batch tile on the
+  tiles per row, and only assemble the full `GEMM_LANES`-lane batch tile on the
   output path. The design must not reinstate a `512`-way divide/modulo
   quantization fanout at output time.
   Nonlinear wrapper scale contract is fixed to:
@@ -231,10 +233,24 @@ A14. On-chip controller replaces per-GEMM host sequencing
       clears it
 
 A15. Throughput target and engine width
-  The implementation target is a 512-lane INT8 GEMM engine on U55C.
-  The existing 8-lane path remains simulation and validation infrastructure only.
-  The production accelerator uses the same control/dataflow pattern with the
-  512-lane engine width.
+  Architectural target (performance):
+    - GEMM_LANES = 512 (M_TILE = 16, N_TILE = 32)
+    - VOCAB_TILE = 128 (LM-head uses 32000/128 = 250 passes)
+
+  Current synthesized / hardware-bringup profile (tool-limited):
+    - GEMM_LANES = 64 (M_TILE = 2, N_TILE = 32)
+    - VOCAB_TILE = 64 (LM-head uses 32000/64 = 500 passes)
+
+  Rationale:
+    - Vivado 2022.1 crashes during global synthesis at very wide packed-struct
+      bus widths for the 512-lane configuration (internal tool limitation).
+    - Until we restructure the wide packed buses or move to a toolflow that can
+      handle the width, we keep the 64-lane profile for synthesis and hardware
+      execution.
+
+  Important:
+    - This does not change TinyLlama-correct model geometry (N_LAYERS, D_MODEL,
+      N_TILE, FEATURE_TILE_COUNT, etc.). It only reduces lane-parallelism.
 
 A16. Accuracy bring-up path
   Validation order:
@@ -258,11 +274,11 @@ B1. LM head precision policy
     - accumulation: INT32
     - weight scales: static per-output-channel
   The outer vocabulary loop is owned by `lm_head_controller.sv`.
-  It issues exactly 250 `VOCAB_TILE = 128` passes to cover the fixed
-  `VOCAB_SIZE = 32000`.
+  Target profile: `VOCAB_TILE = 128` -> 250 passes for `VOCAB_SIZE = 32000`.
+  Current 64-lane profile: `VOCAB_TILE = 64` -> 500 passes.
   The partial-logit tile for each pass is tagged with:
     - `tile_id = vocab_tile_idx`
-    - `elem_count = 128`
+    - `elem_count = VOCAB_TILE`
     - `is_last = 1` only on the final vocab tile
   Greedy argmax is computed after the FPGA-side LM head.
   There is no higher-precision LM-head path in the production bitstream.
