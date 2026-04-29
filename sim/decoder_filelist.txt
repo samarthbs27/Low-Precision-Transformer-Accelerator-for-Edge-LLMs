@@ -1,0 +1,16 @@
+../rtl/common/tinyllama_pkg.sv
+../rtl/common/tinyllama_bus_pkg.sv
+../rtl/compute/mac_lane.sv
+../rtl/compute/accumulator_bank.sv
+../rtl/compute/shared_gemm_engine.sv
+../rtl/compute/causal_mask_unit.sv
+../rtl/nonlinear/softmax_core_hls_ip.sv
+../rtl/nonlinear/softmax_wrapper.sv
+../rtl/control/layer_controller.sv
+../rtl/compute/residual_add.sv
+../rtl/compute/requantize_unit.sv
+../rtl/compute/elementwise_mul.sv
+../rtl/nonlinear/silu_core_hls_ip.sv
+../rtl/nonlinear/silu_wrapper.sv
+../rtl/top/runtime_decoder_datapath.sv
+../rtl/tb/tb_runtime_decoder_datapath.sv

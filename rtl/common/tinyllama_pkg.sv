@@ -1,5 +1,26 @@
 package tinyllama_pkg;
 
+  // ---------------------------------------------------------------------------
+  // Bus-type flat widths — used for `ifdef SYNTHESIS flat port declarations.
+  // Must be defined before the constants they depend on are used in the port
+  // shims, but the expressions themselves are forward-reference-safe because
+  // all referenced localparams are in the same package and are resolved at
+  // elaboration time.
+  //
+  // TILE_TAG_W breakdown (matches tile_tag_t field order in tinyllama_bus_pkg):
+  //   layer_id    LAYER_ID_W  = clog2(N_LAYERS)
+  //   block_id    BLOCK_ID_W  = 6
+  //   gemm_mode   GEMM_MODE_W = 4
+  //   tile_id     TILE_ID_W   = 16
+  //   token_base  POS_W       = clog2(MAX_POS)
+  //   seq_count   COUNT_W     = clog2(MAX_POS+1)
+  //   q_head_id   Q_HEAD_ID_W = clog2(N_Q_HEADS)
+  //   kv_head_id  KV_HEAD_ID_W= clog2(N_KV_HEADS)
+  //   elem_count  ELEM_COUNT_W= 16
+  //   is_last     1
+  //   is_partial  1
+  // ---------------------------------------------------------------------------
+
   // Core TinyLlama architectural constants.
   localparam int unsigned N_LAYERS      = 22;
   localparam int unsigned D_MODEL       = 2048;
@@ -25,7 +46,7 @@ package tinyllama_pkg;
   localparam int unsigned REG_WORD_ADDR_W = AXIL_ADDR_W - 2;
 
   // Memory and tiling parameters.
-  localparam int unsigned GEMM_LANES       = 512;
+  localparam int unsigned GEMM_LANES       = 64;
   localparam int unsigned HBM_PC_COUNT     = 32;
   localparam int unsigned HBM_ADDR_W       = 64;
   localparam int unsigned DMA_BEAT_W       = 256;
@@ -38,12 +59,14 @@ package tinyllama_pkg;
   localparam int unsigned TILE_BUFFER_BANKS = 16;
   localparam int unsigned BANK_SLICE_INT8   = 32;
   localparam int unsigned BANK_SLICE_INT32  = 8;
-  localparam int unsigned M_TILE            = 16;
+  // M_TILE × N_TILE must equal GEMM_LANES (2×32=64).
+  localparam int unsigned M_TILE            = 2;
   localparam int unsigned N_TILE            = 32;
   localparam int unsigned K_TILE            = 64;
   localparam int unsigned SCORE_Q_TILE      = 16;
   localparam int unsigned SCORE_K_TILE      = 64;
-  localparam int unsigned VOCAB_TILE        = 128;
+  // VOCAB_TILE=64: 32000/64=500 tiles (integer), 64 ≤ GEMM_LANES=64.
+  localparam int unsigned VOCAB_TILE        = 64;
   localparam int unsigned HEAD_GROUP_PAR    = 1;
   localparam int unsigned ROPE_CHUNK_TOKENS = GEMM_LANES / HEAD_DIM;
   localparam int unsigned SCORE_ROWS_PER_CHUNK = GEMM_LANES / SCORE_K_TILE;
@@ -78,6 +101,21 @@ package tinyllama_pkg;
   localparam int unsigned TENSOR_ID_W   = 5;
   localparam int unsigned REGION_ID_W   = 3;
   localparam logic [PC_ID_W-1:0] HOST_IO_PC_ID = PC_ID_W'(30);
+
+  // Flat bus widths for `ifdef SYNTHESIS port shims (see tinyllama_bus_pkg.sv for struct layouts).
+  localparam int unsigned TILE_TAG_W         = LAYER_ID_W + BLOCK_ID_W + GEMM_MODE_W
+                                             + TILE_ID_W + POS_W + COUNT_W
+                                             + Q_HEAD_ID_W + KV_HEAD_ID_W + ELEM_COUNT_W + 2;
+  localparam int unsigned ACT_BUS_W          = ACT_VECTOR_ELEMS * ACT_W  + TILE_TAG_W;
+  localparam int unsigned WT_BUS_W           = WEIGHT_VECTOR_ELEMS * WEIGHT_W + TILE_TAG_W;
+  localparam int unsigned ACC_BUS_W          = ACC_VECTOR_ELEMS * ACC_W  + TILE_TAG_W;
+  localparam int unsigned SCALE_BUS_W        = SCALE_VECTOR_ELEMS * SCALE_W + TILE_TAG_W;
+  localparam int unsigned DMA_DESC_W         = REGION_ID_W + TENSOR_ID_W + 1 + PC_ID_W
+                                             + HBM_ADDR_W + 16 + 32
+                                             + LAYER_ID_W + KV_HEAD_ID_W + TILE_ID_W;
+  localparam int unsigned TOKEN_BUS_W        = TOKEN_W + COUNT_W + TILE_TAG_W;
+  localparam int unsigned TOKEN_WRITE_DESC_W = TOKEN_W + HBM_ADDR_W + COUNT_W;
+  localparam int unsigned DBG_BUS_T_W        = DEBUG_BUS_W + TILE_TAG_W;
 
   // Host command/status block layout in PC30.
   localparam int unsigned HOST_BLOCK_WORDS = DMA_BEAT_W / AXIL_DATA_W;

@@ -63,7 +63,9 @@ module tinyllama_u55c_shell_wrapper (
 
   assign core_rd_desc_packed = core_rd_desc;
   assign shell_rd_desc_o     = dma_desc_t'(shell_rd_desc_packed);
+`ifndef SYNTHESIS
   assign core_wr_desc_packed = core_wr_desc;
+`endif
   assign core_wr_req_packed  = {core_wr_desc_packed, core_wr_data};
   assign shell_wr_desc_packed = shell_wr_req_packed[DMA_WR_REQ_W-1 -: DMA_DESC_W];
   assign shell_wr_desc_o     = dma_desc_t'(shell_wr_desc_packed);

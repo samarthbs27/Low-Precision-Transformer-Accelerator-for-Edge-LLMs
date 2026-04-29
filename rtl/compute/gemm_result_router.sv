@@ -63,10 +63,10 @@ module gemm_result_router (
   endfunction
 
   requantize_unit u_requantize_unit (
-    .acc_i(acc_i),
-    .scale_i(scale_i),
+    .acc_i             (acc_i),
+    .scale_i           (scale_i),
     .nonnegative_only_i(1'b0),
-    .act_o(requantized_bus)
+    .act_o             (requantized_bus)
   );
 
   assign quant_o  = quant_bus_d;

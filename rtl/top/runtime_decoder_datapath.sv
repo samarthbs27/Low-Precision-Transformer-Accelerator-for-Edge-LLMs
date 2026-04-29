@@ -34,22 +34,27 @@ module runtime_decoder_datapath (
   localparam int unsigned FEATURE_TILE_COUNT = D_MODEL / N_TILE;
   localparam int unsigned BLOCKS_PER_LAYER = 6 + (4 * N_Q_HEADS) + 12;
 
-  typedef enum logic [3:0] {
-    DDP_IDLE       = 4'd0,
-    DDP_CAPTURE    = 4'd1,
-    DDP_READY      = 4'd2,
-    DDP_BLOCK      = 4'd3,
-    DDP_APPLY_SEND = 4'd4,
-    DDP_APPLY_WAIT = 4'd5,
-    DDP_GEMM_SEND  = 4'd6,
-    DDP_GEMM_WAIT  = 4'd7,
-    DDP_SILU_SEND  = 4'd8,
-    DDP_SILU_SCALE = 4'd9,
-    DDP_SILU_ACT   = 4'd10,
-    DDP_MUL_SEND   = 4'd11,
-    DDP_MUL_WAIT   = 4'd12,
-    DDP_OUT_SCALE  = 4'd13,
-    DDP_OUT_ACT    = 4'd14
+  typedef enum logic [4:0] {
+    DDP_IDLE            = 5'd0,
+    DDP_CAPTURE         = 5'd1,
+    DDP_READY           = 5'd2,
+    DDP_BLOCK           = 5'd3,
+    DDP_APPLY_SEND      = 5'd4,
+    DDP_APPLY_WAIT      = 5'd5,
+    DDP_GEMM_SEND       = 5'd6,
+    DDP_GEMM_WAIT       = 5'd7,
+    DDP_SILU_SEND       = 5'd8,
+    DDP_SILU_SCALE      = 5'd9,
+    DDP_SILU_ACT        = 5'd10,
+    DDP_MUL_SEND        = 5'd11,
+    DDP_MUL_WAIT        = 5'd12,
+    DDP_OUT_SCALE       = 5'd13,
+    DDP_OUT_ACT         = 5'd14,
+    DDP_MASK_APPLY      = 5'd15,
+    DDP_SOFTMAX_ARM     = 5'd16,
+    DDP_SOFTMAX_SCORE   = 5'd17,
+    DDP_SOFTMAX_SCALE   = 5'd18,
+    DDP_SOFTMAX_ACT     = 5'd19
   } ddp_state_e;
 
   ddp_state_e                           state_q;
@@ -84,6 +89,16 @@ module runtime_decoder_datapath (
   logic [(ACT_VECTOR_ELEMS * ACT_W)-1:0] ffn_mul_tiles_q  [0:FEATURE_TILE_COUNT-1];
   logic [(ACT_VECTOR_ELEMS * ACT_W)-1:0] attn_weighted_tiles_q [0:FEATURE_TILE_COUNT-1];
   logic [(ACT_VECTOR_ELEMS * ACT_W)-1:0] attn_o_tiles_q        [0:FEATURE_TILE_COUNT-1];
+  logic [FEATURE_TILE_COUNT-1:0]         attn_weighted_valid_q;
+  logic [FEATURE_TILE_COUNT-1:0]         attn_o_valid_q;
+  acc_bus_t                               attn_score_acc_q;
+  acc_bus_t                               attn_masked_acc_q;
+  logic [(ACT_VECTOR_ELEMS * ACT_W)-1:0] attn_prob_tile_q;
+  logic [(SCALE_VECTOR_ELEMS * SCALE_W)-1:0] attn_score_scale_q;
+  logic [(SCALE_VECTOR_ELEMS * SCALE_W)-1:0] attn_prob_scale_q;
+  logic                                   attn_score_valid_q;
+  logic                                   attn_masked_valid_q;
+  logic                                   attn_prob_valid_q;
   scale_bus_t                           final_scale_d;
   act_bus_t                             final_act_d;
   acc_bus_t                             apply_residual_d;
@@ -127,6 +142,21 @@ module runtime_decoder_datapath (
   logic                                 mul_prod_valid_w;
   logic                                 mul_busy_w;
   logic                                 mul_done_w;
+  acc_bus_t                             masked_score_comb_w;
+  logic                                 softmax_score_ready_w;
+  logic                                 softmax_prob_valid_w;
+  logic                                 softmax_prob_scale_valid_w;
+  logic                                 softmax_busy_w;
+  logic                                 softmax_done_w;
+  scale_bus_t                           softmax_prob_scale_bus_w;
+  act_bus_t                             softmax_prob_bus_w;
+  logic [SCALE_W-1:0]                   softmax_score_scale_w;
+
+
+  wire                                  softmax_score_valid_w;
+  wire                                  softmax_prob_scale_ready_w;
+  wire                                  softmax_prob_ready_w;
+  wire                                  gemm_operands_valid_w;
 
   function automatic logic signed [31:0] sext_act8(
     input logic signed [ACT_W-1:0] value
@@ -174,14 +204,14 @@ module runtime_decoder_datapath (
         BLOCK_DOWN:           latency_d = 4'd4;
         BLOCK_ROPE,
         BLOCK_KV_CACHE_WRITE,
-        BLOCK_CAUSAL_MASK,
         BLOCK_RESIDUAL1,
         BLOCK_RESIDUAL2,
         BLOCK_REQUANTIZE,
         BLOCK_GLU_MUL:        latency_d = 4'd2;
         BLOCK_SCORE,
-        BLOCK_WEIGHTED_SUM:   latency_d = 4'd3 + {3'd0, q_head_id[0]};
-        BLOCK_SOFTMAX,
+        BLOCK_WEIGHTED_SUM,
+        BLOCK_CAUSAL_MASK,
+        BLOCK_SOFTMAX:        latency_d = 4'd1;
         BLOCK_SILU:           latency_d = 4'd3;
         default:              latency_d = 4'd1;
       endcase
@@ -220,8 +250,10 @@ module runtime_decoder_datapath (
         BLOCK_GATE,
         BLOCK_UP,
         BLOCK_DOWN,
-        BLOCK_O:    is_ffn_projection_block = 1'b1;
-        default:    is_ffn_projection_block = 1'b0;
+        BLOCK_O,
+        BLOCK_SCORE,
+        BLOCK_WEIGHTED_SUM: is_ffn_projection_block = 1'b1;
+        default:            is_ffn_projection_block = 1'b0;
       endcase
     end
   endfunction
@@ -251,12 +283,25 @@ module runtime_decoder_datapath (
   );
     begin
       unique case (block_id)
-        BLOCK_GATE: projection_gemm_mode = GEMM_GATE;
-        BLOCK_UP:   projection_gemm_mode = GEMM_UP;
-        BLOCK_DOWN: projection_gemm_mode = GEMM_DOWN;
-        BLOCK_O:    projection_gemm_mode = GEMM_O;
-        default:    projection_gemm_mode = GEMM_NONE;
+        BLOCK_GATE:         projection_gemm_mode = GEMM_GATE;
+        BLOCK_UP:           projection_gemm_mode = GEMM_UP;
+        BLOCK_DOWN:         projection_gemm_mode = GEMM_DOWN;
+        BLOCK_O:            projection_gemm_mode = GEMM_O;
+        BLOCK_SCORE:        projection_gemm_mode = GEMM_SCORE;
+        BLOCK_WEIGHTED_SUM: projection_gemm_mode = GEMM_WEIGHTED_SUM;
+        default:            projection_gemm_mode = GEMM_NONE;
       endcase
+    end
+  endfunction
+
+  function automatic logic [15:0] score_query_rows_from_elem(
+    input logic [ELEM_COUNT_W-1:0] elem_count
+  );
+    int unsigned eff;
+    begin
+      eff = (elem_count == '0) ? int'(SCORE_CHUNK_ELEMS) : int'(elem_count);
+      score_query_rows_from_elem =
+        16'((eff + int'(SCORE_K_TILE) - 1) / int'(SCORE_K_TILE));
     end
   endfunction
 
@@ -448,6 +493,10 @@ module runtime_decoder_datapath (
           weight_term = lane_term - row_term + sig_term + head_term -
                         layer_term;
         end
+        BLOCK_SCORE,
+        BLOCK_WEIGHTED_SUM: begin
+          weight_term = head_term + row_term + sig_term - tile_term[2:0];
+        end
         default: begin
           weight_term = sig_term;
         end
@@ -475,6 +524,9 @@ module runtime_decoder_datapath (
                            (state_q == DDP_SILU_SEND) || (state_q == DDP_SILU_SCALE) ||
                            (state_q == DDP_SILU_ACT) || (state_q == DDP_MUL_SEND) ||
                            (state_q == DDP_MUL_WAIT) ||
+                           (state_q == DDP_MASK_APPLY) ||
+                           (state_q == DDP_SOFTMAX_ARM) || (state_q == DDP_SOFTMAX_SCORE) ||
+                           (state_q == DDP_SOFTMAX_SCALE) || (state_q == DDP_SOFTMAX_ACT) ||
                            (state_q == DDP_OUT_SCALE) || (state_q == DDP_OUT_ACT);
   assign embed_scale_ready_o = (state_q == DDP_CAPTURE) && !scale_seen_q;
   assign embed_act_ready_o = (state_q == DDP_CAPTURE) && scale_seen_q;
@@ -548,6 +600,9 @@ module runtime_decoder_datapath (
         gemm_act_d.data = ffn_mul_tiles_q[apply_tile_idx_q];
       end else if (active_block_q == BLOCK_O) begin
         gemm_act_d.data = attn_weighted_tiles_q[apply_tile_idx_q];
+      end else if (active_block_q == BLOCK_WEIGHTED_SUM) begin
+        gemm_act_d.data = attn_prob_tile_q;
+        gemm_scale_d.data = attn_prob_scale_q;
       end else begin
         gemm_act_d.data = hidden_tiles_q[apply_tile_idx_q];
       end
@@ -770,7 +825,7 @@ module runtime_decoder_datapath (
     .clear_acc_i     (state_q == DDP_GEMM_SEND),
     .mac_valid_i     (state_q == DDP_GEMM_SEND),
     .emit_acc_i      (state_q == DDP_GEMM_SEND),
-    .operands_valid_i(state_q == DDP_GEMM_SEND),
+    .operands_valid_i(gemm_operands_valid_w),
     .operands_ready_o(gemm_operands_ready_w),
     .act_i           (gemm_act_d),
     .wt_i            (gemm_wt_d),
@@ -835,6 +890,40 @@ module runtime_decoder_datapath (
     .act_o              (mul_requant_w)
   );
 
+  causal_mask_unit u_causal_mask (
+    .runtime_mode_i   (runtime_mode_i),
+    .query_pos_base_i  (context_token_base_q),
+    .key_pos_base_i     (context_token_base_q),
+    .query_row_count_i (COUNT_W'(score_query_rows_from_elem(attn_score_acc_q.tag.elem_count))),
+    .key_col_count_i    (COUNT_W'(SCORE_K_TILE)),
+    .score_i            (attn_score_acc_q),
+    .masked_o           (masked_score_comb_w)
+  );
+
+  assign softmax_score_valid_w     = (state_q == DDP_SOFTMAX_SCORE) && attn_masked_valid_q;
+  assign softmax_score_scale_w     = effective_scale(attn_score_scale_q[0 +: SCALE_W]);
+  assign softmax_prob_scale_ready_w = (state_q == DDP_SOFTMAX_SCALE);
+  assign softmax_prob_ready_w      = (state_q == DDP_SOFTMAX_ACT);
+  assign gemm_operands_valid_w     = (state_q == DDP_GEMM_SEND) &&
+                                     ((active_block_q != BLOCK_WEIGHTED_SUM) || attn_prob_valid_q);
+
+  softmax_wrapper u_block_softmax (
+    .ap_clk             (ap_clk),
+    .ap_rst_n           (ap_rst_n && !abort_req_i),
+    .score_valid_i      (softmax_score_valid_w),
+    .score_ready_o      (softmax_score_ready_w),
+    .score_i            (attn_masked_acc_q),
+    .score_scale_i      (softmax_score_scale_w),
+    .prob_scale_valid_o (softmax_prob_scale_valid_w),
+    .prob_scale_ready_i (softmax_prob_scale_ready_w),
+    .prob_scale_o       (softmax_prob_scale_bus_w),
+    .prob_valid_o       (softmax_prob_valid_w),
+    .prob_ready_i       (softmax_prob_ready_w),
+    .prob_o             (softmax_prob_bus_w),
+    .busy_o             (softmax_busy_w),
+    .done_pulse_o       (softmax_done_w)
+  );
+
   always_ff @(posedge ap_clk) begin
     block_done_o <= 1'b0;
     final_hidden_done_pulse_o <= 1'b0;
@@ -866,15 +955,16 @@ module runtime_decoder_datapath (
       active_kv_head_q <= '0;
       apply_signature_q <= '0;
       down_gemm_acc_q <= '0;
-      for (int tile_idx = 0; tile_idx < FEATURE_TILE_COUNT; tile_idx++) begin
-        hidden_tiles_q[tile_idx] <= '0;
-        ffn_gate_tiles_q[tile_idx] <= '0;
-        ffn_up_tiles_q[tile_idx] <= '0;
-        ffn_silu_tiles_q[tile_idx] <= '0;
-        ffn_mul_tiles_q[tile_idx] <= '0;
-        attn_weighted_tiles_q[tile_idx] <= '0;
-        attn_o_tiles_q[tile_idx] <= '0;
-      end
+      attn_score_acc_q   <= '0;
+      attn_masked_acc_q  <= '0;
+      attn_prob_tile_q   <= '0;
+      attn_score_scale_q <= '0;
+      attn_prob_scale_q  <= '0;
+      attn_weighted_valid_q <= '0;
+      attn_o_valid_q <= '0;
+      attn_score_valid_q <= 1'b0;
+      attn_masked_valid_q <= 1'b0;
+      attn_prob_valid_q <= 1'b0;
     end else begin
       if (launch_i) begin
         state_q <= DDP_CAPTURE;
@@ -903,14 +993,16 @@ module runtime_decoder_datapath (
         active_kv_head_q <= '0;
         apply_signature_q <= '0;
         down_gemm_acc_q <= '0;
-        for (int tile_idx = 0; tile_idx < FEATURE_TILE_COUNT; tile_idx++) begin
-          ffn_gate_tiles_q[tile_idx] <= '0;
-          ffn_up_tiles_q[tile_idx] <= '0;
-          ffn_silu_tiles_q[tile_idx] <= '0;
-          ffn_mul_tiles_q[tile_idx] <= '0;
-          attn_weighted_tiles_q[tile_idx] <= '0;
-          attn_o_tiles_q[tile_idx] <= '0;
-        end
+        attn_score_acc_q   <= '0;
+        attn_masked_acc_q  <= '0;
+        attn_prob_tile_q   <= '0;
+        attn_score_scale_q <= '0;
+        attn_prob_scale_q  <= '0;
+        attn_weighted_valid_q <= '0;
+        attn_o_valid_q <= '0;
+        attn_score_valid_q <= 1'b0;
+        attn_masked_valid_q <= 1'b0;
+        attn_prob_valid_q <= 1'b0;
       end else if (abort_req_i) begin
         state_q <= DDP_IDLE;
         scale_seen_q <= 1'b0;
@@ -932,6 +1024,16 @@ module runtime_decoder_datapath (
         active_kv_head_q <= '0;
         apply_signature_q <= '0;
         down_gemm_acc_q <= '0;
+        attn_score_acc_q   <= '0;
+        attn_masked_acc_q  <= '0;
+        attn_prob_tile_q   <= '0;
+        attn_score_scale_q <= '0;
+        attn_prob_scale_q  <= '0;
+        attn_weighted_valid_q <= '0;
+        attn_o_valid_q <= '0;
+        attn_score_valid_q <= 1'b0;
+        attn_masked_valid_q <= 1'b0;
+        attn_prob_valid_q <= 1'b0;
       end else begin
         if (embed_scale_valid_i && embed_scale_ready_o) begin
           hidden_scale_q <= embed_scale_i.data;
@@ -971,6 +1073,11 @@ module runtime_decoder_datapath (
 
           DDP_READY: begin
             if (block_valid_i && block_start_i) begin
+              if (block_id_i == BLOCK_SCORE) begin
+                attn_score_valid_q <= 1'b0;
+                attn_masked_valid_q <= 1'b0;
+                attn_prob_valid_q <= 1'b0;
+              end
               if (layer_id_i != active_layer_q) begin
                 layer_block_count_q <= '0;
               end
@@ -1045,6 +1152,10 @@ module runtime_decoder_datapath (
 
               if (is_ffn_projection_block(active_block_q)) begin
                 state_q <= DDP_GEMM_SEND;
+              end else if (active_block_q == BLOCK_CAUSAL_MASK) begin
+                state_q <= DDP_MASK_APPLY;
+              end else if (active_block_q == BLOCK_SOFTMAX) begin
+                state_q <= DDP_SOFTMAX_ARM;
               end else if (active_block_q == BLOCK_SILU) begin
                 state_q <= DDP_SILU_SEND;
               end else if (active_block_q == BLOCK_GLU_MUL) begin
@@ -1064,10 +1175,6 @@ module runtime_decoder_datapath (
           DDP_APPLY_WAIT: begin
             if (apply_sum_valid_w) begin
               unique case (active_block_q)
-                BLOCK_WEIGHTED_SUM: begin
-                  attn_weighted_tiles_q[apply_tile_idx_q] <= apply_requant_w.data;
-                end
-
                 BLOCK_GATE: begin
                   ffn_gate_tiles_q[apply_tile_idx_q] <= apply_requant_w.data;
                 end
@@ -1077,6 +1184,7 @@ module runtime_decoder_datapath (
 
                 BLOCK_RESIDUAL1: begin
                   hidden_tiles_q[apply_tile_idx_q] <= apply_requant_w.data;
+                  attn_o_valid_q[apply_tile_idx_q] <= 1'b0;
                 end
 
                 default: begin
@@ -1104,14 +1212,111 @@ module runtime_decoder_datapath (
           end
 
           DDP_GEMM_SEND: begin
-            if (gemm_operands_ready_w) begin
+            if (gemm_operands_valid_w && gemm_operands_ready_w) begin
               state_q <= DDP_GEMM_WAIT;
+            end
+          end
+
+          DDP_MASK_APPLY: begin
+            if (attn_score_valid_q) begin
+              attn_masked_acc_q <= masked_score_comb_w;
+              attn_masked_valid_q <= 1'b1;
+              attn_score_valid_q <= 1'b0;
+              if (advance_tile_cursor_on_block(active_block_q)) begin
+                tile_cursor_q <= next_tile_cursor(tile_cursor_q, apply_stride_q);
+              end
+              context_signature_q <= apply_signature_q;
+              layer_block_count_q <= layer_block_count_q + 1'b1;
+              block_done_o <= 1'b1;
+              if ((active_layer_q == LAYER_ID_W'(N_LAYERS - 1)) &&
+                  (layer_block_count_q == (BLOCKS_PER_LAYER - 1))) begin
+                final_tile_idx_q <= '0;
+                state_q <= DDP_OUT_SCALE;
+              end else begin
+                state_q <= DDP_READY;
+              end
+            end
+          end
+
+          DDP_SOFTMAX_ARM: begin
+            state_q <= DDP_SOFTMAX_SCORE;
+          end
+
+          DDP_SOFTMAX_SCORE: begin
+            if (softmax_score_valid_w && softmax_score_ready_w) begin
+              attn_masked_valid_q <= 1'b0;
+              state_q <= DDP_SOFTMAX_SCALE;
+            end
+          end
+
+          DDP_SOFTMAX_SCALE: begin
+            if (softmax_prob_scale_valid_w && softmax_prob_scale_ready_w) begin
+              attn_prob_scale_q <= softmax_prob_scale_bus_w.data;
+              state_q <= DDP_SOFTMAX_ACT;
+            end
+          end
+
+          DDP_SOFTMAX_ACT: begin
+            if (softmax_prob_valid_w && softmax_prob_ready_w) begin
+              attn_prob_tile_q <= softmax_prob_bus_w.data;
+              attn_prob_valid_q <= 1'b1;
+              if (advance_tile_cursor_on_block(active_block_q)) begin
+                tile_cursor_q <= next_tile_cursor(tile_cursor_q, apply_stride_q);
+              end
+              context_signature_q <= apply_signature_q;
+              layer_block_count_q <= layer_block_count_q + 1'b1;
+              block_done_o <= 1'b1;
+              if ((active_layer_q == LAYER_ID_W'(N_LAYERS - 1)) &&
+                  (layer_block_count_q == (BLOCKS_PER_LAYER - 1))) begin
+                final_tile_idx_q <= '0;
+                state_q <= DDP_OUT_SCALE;
+              end else begin
+                state_q <= DDP_READY;
+              end
             end
           end
 
           DDP_GEMM_WAIT: begin
             if (gemm_acc_valid_w) begin
               unique case (active_block_q)
+                BLOCK_SCORE: begin
+                  attn_score_acc_q <= gemm_acc_w;
+                  attn_score_scale_q <= gemm_scale_d.data;
+                  attn_score_valid_q <= 1'b1;
+                  if (advance_tile_cursor_on_block(active_block_q)) begin
+                    tile_cursor_q <= next_tile_cursor(tile_cursor_q, apply_stride_q);
+                  end
+                  context_signature_q <= apply_signature_q;
+                  layer_block_count_q <= layer_block_count_q + 1'b1;
+                  block_done_o <= 1'b1;
+                  state_q <= ((active_layer_q == LAYER_ID_W'(N_LAYERS - 1)) &&
+                              (layer_block_count_q == (BLOCKS_PER_LAYER - 1))) ?
+                             DDP_OUT_SCALE : DDP_READY;
+                  if ((active_layer_q == LAYER_ID_W'(N_LAYERS - 1)) &&
+                      (layer_block_count_q == (BLOCKS_PER_LAYER - 1))) begin
+                    final_tile_idx_q <= '0;
+                  end
+                end
+
+                BLOCK_WEIGHTED_SUM: begin
+                  attn_weighted_tiles_q[apply_tile_idx_q] <= gemm_requant_w.data;
+                  attn_weighted_valid_q[apply_tile_idx_q] <= 1'b1;
+                  attn_prob_valid_q <= 1'b0;
+                  if (advance_tile_cursor_on_block(active_block_q)) begin
+                    tile_cursor_q <= next_tile_cursor(tile_cursor_q, apply_stride_q);
+                  end
+                  context_signature_q <= apply_signature_q;
+                  layer_block_count_q <= layer_block_count_q + 1'b1;
+                  block_done_o <= 1'b1;
+                  state_q <= ((active_layer_q == LAYER_ID_W'(N_LAYERS - 1)) &&
+                              (layer_block_count_q == (BLOCKS_PER_LAYER - 1))) ?
+                             DDP_OUT_SCALE : DDP_READY;
+                  if ((active_layer_q == LAYER_ID_W'(N_LAYERS - 1)) &&
+                      (layer_block_count_q == (BLOCKS_PER_LAYER - 1))) begin
+                    final_tile_idx_q <= '0;
+                  end
+                end
+
                 BLOCK_GATE: begin
                   ffn_gate_tiles_q[apply_tile_idx_q] <= gemm_requant_w.data;
                   context_signature_q <= apply_signature_q;
@@ -1148,6 +1353,8 @@ module runtime_decoder_datapath (
 
                 BLOCK_O: begin
                   attn_o_tiles_q[apply_tile_idx_q] <= gemm_requant_w.data;
+                  attn_o_valid_q[apply_tile_idx_q] <= 1'b1;
+                  attn_weighted_valid_q[apply_tile_idx_q] <= 1'b0;
                   context_signature_q <= apply_signature_q;
                   layer_block_count_q <= layer_block_count_q + 1'b1;
                   block_done_o <= 1'b1;

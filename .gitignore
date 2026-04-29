@@ -8,6 +8,7 @@ docs/array_architecture.txt
 docs/fpga_team_roles.txt
 docs/meeting_notes.txt
 docs/Milestone3_Progress_Report.docx
+docs/sol_synthesis_guide.md
 
 # Simulation outputs
 sim/*.vvp
@@ -33,6 +34,18 @@ sim/golden_traces/
 /xsim_*.backup.jou
 /xsim_*.backup.log
 /dfx_runtime.txt
+.Xil/
+
+# Claude Code internal directory (CLAUDE.md is separately ignored above)
+.claude/
+
+# Java HotSpot crash dumps from Vivado/XSIM
+hs_err_pid*.dmp
+hs_err_pid*.log
+
+# Synthesis outputs — derived artifacts, DCP files are large binaries
+synth/out/
+synth/logs/
 
 # Python cache
 __pycache__/
@@ -43,3 +56,6 @@ model/data/
 
 # SOL
 SOL/
+
+# Compiled binary artifacts
+/a.out

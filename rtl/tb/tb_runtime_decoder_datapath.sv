@@ -74,6 +74,11 @@ module tb_runtime_decoder_datapath;
   logic [(ACT_VECTOR_ELEMS * ACT_W)-1:0] expected_mul_tiles_q  [0:FEATURE_TILE_COUNT-1];
   logic [(ACT_VECTOR_ELEMS * ACT_W)-1:0] expected_weighted_tiles_q [0:FEATURE_TILE_COUNT-1];
   logic [(ACT_VECTOR_ELEMS * ACT_W)-1:0] expected_o_tiles_q        [0:FEATURE_TILE_COUNT-1];
+  logic signed [(ACC_VECTOR_ELEMS * ACC_W)-1:0] expected_score_acc_flat_q [0:FEATURE_TILE_COUNT-1];
+  logic signed [(ACC_VECTOR_ELEMS * ACC_W)-1:0] expected_masked_acc_flat_q [0:FEATURE_TILE_COUNT-1];
+  logic signed [(ACC_VECTOR_ELEMS * ACC_W)-1:0] expected_down_gemm_acc_q [0:FEATURE_TILE_COUNT-1];
+  logic [(ACT_VECTOR_ELEMS * ACT_W)-1:0] expected_prob_tiles_q [0:FEATURE_TILE_COUNT-1];
+  logic [(ACT_VECTOR_ELEMS * ACT_W)-1:0] expected_latest_prob_tile_q;
   logic [FEATURE_TILE_COUNT-1:0]         expected_touched_tiles_q;
   logic [31:0]                          expected_signature_seed;
   logic [31:0]                          expected_signature_q;
@@ -88,6 +93,11 @@ module tb_runtime_decoder_datapath;
   logic [KV_HEAD_ID_W-1:0]              pending_kv_head_id_q;
   runtime_mode_e                        pending_runtime_mode_q;
   logic                                 pending_block_valid_q;
+  logic                                 attn_score_seen_q;
+  logic                                 attn_mask_seen_q;
+  logic                                 attn_prob_seen_q;
+  logic                                 attn_weighted_seen_q;
+  logic                                 attn_o_seen_q;
   int unsigned                          mul_done_count;
   logic                                 saw_mul_done;
   int unsigned                          silu_done_count;
@@ -96,6 +106,8 @@ module tb_runtime_decoder_datapath;
   int unsigned                          up_gemm_count;
   int unsigned                          down_gemm_count;
   int unsigned                          o_gemm_count;
+  int unsigned                          score_gemm_count;
+  int unsigned                          wsum_gemm_count;
   string                                quant_base_path;
 
   function automatic bit file_exists(
@@ -370,6 +382,10 @@ module tb_runtime_decoder_datapath;
         BLOCK_DOWN: begin
           weight_term = lane_term - row_term + sig_term + head_term -
                         layer_term;
+        end
+        BLOCK_SCORE,
+        BLOCK_WEIGHTED_SUM: begin
+          weight_term = head_term + row_term + sig_term - tile_term[2:0];
         end
         default: begin
           weight_term = sig_term;
@@ -956,12 +972,18 @@ module tb_runtime_decoder_datapath;
       expected_ffn_stride_q <= '0;
       expected_attn_o_tile_anchor_q <= '0;
       expected_attn_o_stride_q <= '0;
+      expected_latest_prob_tile_q <= '0;
       pending_layer_id_q <= '0;
       pending_block_id_q <= BLOCK_NONE;
       pending_q_head_id_q <= '0;
       pending_kv_head_id_q <= '0;
       pending_runtime_mode_q <= MODE_PREFILL;
       pending_block_valid_q <= 1'b0;
+      attn_score_seen_q <= 1'b0;
+      attn_mask_seen_q <= 1'b0;
+      attn_prob_seen_q <= 1'b0;
+      attn_weighted_seen_q <= 1'b0;
+      attn_o_seen_q <= 1'b0;
       mul_done_count <= 0;
       saw_mul_done <= 1'b0;
       silu_done_count <= 0;
@@ -970,6 +992,8 @@ module tb_runtime_decoder_datapath;
       up_gemm_count <= 0;
       down_gemm_count <= 0;
       o_gemm_count <= 0;
+      score_gemm_count <= 0;
+      wsum_gemm_count <= 0;
       for (int tile_idx = 0; tile_idx < FEATURE_TILE_COUNT; tile_idx++) begin
         captured_final_tiles[tile_idx] <= '0;
         expected_final_tiles[tile_idx] <= expected_seed_tiles[tile_idx];
@@ -979,6 +1003,10 @@ module tb_runtime_decoder_datapath;
         expected_mul_tiles_q[tile_idx] <= '0;
         expected_weighted_tiles_q[tile_idx] <= '0;
         expected_o_tiles_q[tile_idx] <= '0;
+        expected_score_acc_flat_q[tile_idx] <= '0;
+        expected_masked_acc_flat_q[tile_idx] <= '0;
+        expected_down_gemm_acc_q[tile_idx] <= '0;
+        expected_prob_tiles_q[tile_idx] <= '0;
       end
     end else begin
       if (launch) begin
@@ -989,12 +1017,18 @@ module tb_runtime_decoder_datapath;
         expected_ffn_stride_q <= '0;
         expected_attn_o_tile_anchor_q <= '0;
         expected_attn_o_stride_q <= '0;
+        expected_latest_prob_tile_q <= '0;
         pending_layer_id_q <= '0;
         pending_block_id_q <= BLOCK_NONE;
         pending_q_head_id_q <= '0;
         pending_kv_head_id_q <= '0;
         pending_runtime_mode_q <= MODE_PREFILL;
         pending_block_valid_q <= 1'b0;
+        attn_score_seen_q <= 1'b0;
+        attn_mask_seen_q <= 1'b0;
+        attn_prob_seen_q <= 1'b0;
+        attn_weighted_seen_q <= 1'b0;
+        attn_o_seen_q <= 1'b0;
         mul_done_count <= 0;
         saw_mul_done <= 1'b0;
         silu_done_count <= 0;
@@ -1003,6 +1037,8 @@ module tb_runtime_decoder_datapath;
         up_gemm_count <= 0;
         down_gemm_count <= 0;
         o_gemm_count <= 0;
+        score_gemm_count <= 0;
+        wsum_gemm_count <= 0;
         for (int tile_idx = 0; tile_idx < FEATURE_TILE_COUNT; tile_idx++) begin
           expected_final_tiles[tile_idx] <= expected_seed_tiles[tile_idx];
           expected_gate_tiles_q[tile_idx] <= '0;
@@ -1011,6 +1047,10 @@ module tb_runtime_decoder_datapath;
           expected_mul_tiles_q[tile_idx] <= '0;
           expected_weighted_tiles_q[tile_idx] <= '0;
           expected_o_tiles_q[tile_idx] <= '0;
+          expected_score_acc_flat_q[tile_idx] <= '0;
+          expected_masked_acc_flat_q[tile_idx] <= '0;
+          expected_down_gemm_acc_q[tile_idx] <= '0;
+          expected_prob_tiles_q[tile_idx] <= '0;
         end
       end
 
@@ -1030,24 +1070,15 @@ module tb_runtime_decoder_datapath;
         unique case (dut.active_block_q)
           BLOCK_GATE: gate_gemm_count <= gate_gemm_count + 1;
           BLOCK_UP:   up_gemm_count <= up_gemm_count + 1;
-          BLOCK_DOWN: down_gemm_count <= down_gemm_count + 1;
+          BLOCK_DOWN: begin
+            down_gemm_count <= down_gemm_count + 1;
+            expected_down_gemm_acc_q[dut.apply_tile_idx_q] <= dut.gemm_acc_w.data;
+          end
           BLOCK_O:    o_gemm_count <= o_gemm_count + 1;
+          BLOCK_SCORE:        score_gemm_count <= score_gemm_count + 1;
+          BLOCK_WEIGHTED_SUM: wsum_gemm_count <= wsum_gemm_count + 1;
           default: begin end
         endcase
-      end
-
-      if (block_start) begin
-        block_start_count <= block_start_count + 1;
-        pending_layer_id_q <= layer_id;
-        pending_block_id_q <= layer_block_id;
-        pending_q_head_id_q <= q_head_id;
-        pending_kv_head_id_q <= kv_head_id;
-        pending_runtime_mode_q <= layer_runtime_mode;
-        pending_block_valid_q <= 1'b1;
-        if (!saw_first_block_start) begin
-          saw_first_block_start <= 1'b1;
-          first_block_start_cycle <= cycle_count;
-        end
       end
 
       if (block_done) begin
@@ -1107,19 +1138,97 @@ module tb_runtime_decoder_datapath;
                                  expected_apply_signature);
         end
 
+        if (expected_apply_tile != dut.apply_tile_idx_q) begin
+          $error("runtime_decoder_datapath apply tile mismatch at block_done: block=%0d expected_apply_tile=%0d dut_apply_tile=%0d",
+                 pending_block_id_q,
+                 expected_apply_tile,
+                 dut.apply_tile_idx_q);
+          $finish;
+        end
+        if (expected_apply_signature != dut.apply_signature_q) begin
+          $error("runtime_decoder_datapath apply signature mismatch at block_done: block=%0d expected_sig=0x%08x dut_sig=0x%08x",
+                 pending_block_id_q,
+                 expected_apply_signature,
+                 dut.apply_signature_q);
+          $finish;
+        end
+
+        // Attention-chain ordering checks (per active head sequence):
+        // SCORE -> CAUSAL_MASK -> SOFTMAX -> WEIGHTED_SUM -> O -> RESIDUAL1
         unique case (pending_block_id_q)
+          BLOCK_SCORE: begin
+            attn_score_seen_q <= 1'b1;
+            attn_mask_seen_q <= 1'b0;
+            attn_prob_seen_q <= 1'b0;
+            attn_weighted_seen_q <= 1'b0;
+            attn_o_seen_q <= 1'b0;
+          end
+          BLOCK_CAUSAL_MASK: begin
+            if (!attn_score_seen_q) begin
+              $error("runtime_decoder_datapath ordering violation: CAUSAL_MASK done before SCORE");
+              $finish;
+            end
+            attn_mask_seen_q <= 1'b1;
+          end
+          BLOCK_SOFTMAX: begin
+            if (!attn_mask_seen_q) begin
+              $error("runtime_decoder_datapath ordering violation: SOFTMAX done before CAUSAL_MASK");
+              $finish;
+            end
+            attn_prob_seen_q <= 1'b1;
+          end
+          BLOCK_WEIGHTED_SUM: begin
+            if (!attn_prob_seen_q) begin
+              $error("runtime_decoder_datapath ordering violation: WEIGHTED_SUM done before SOFTMAX");
+              $finish;
+            end
+            attn_weighted_seen_q <= 1'b1;
+          end
+          BLOCK_O: begin
+            if (!attn_weighted_seen_q) begin
+              $error("runtime_decoder_datapath ordering violation: O done before WEIGHTED_SUM");
+              $finish;
+            end
+            attn_o_seen_q <= 1'b1;
+          end
+          BLOCK_RESIDUAL1: begin
+            if (!attn_o_seen_q) begin
+              $error("runtime_decoder_datapath ordering violation: RESIDUAL1 done before O");
+              $finish;
+            end
+            // Residual1 terminates this attention subchain instance.
+            attn_score_seen_q <= 1'b0;
+            attn_mask_seen_q <= 1'b0;
+            attn_prob_seen_q <= 1'b0;
+            attn_weighted_seen_q <= 1'b0;
+            attn_o_seen_q <= 1'b0;
+          end
+          default: begin end
+        endcase
+
+        unique case (pending_block_id_q)
+          BLOCK_SCORE: begin
+            expected_score_acc_flat_q[expected_apply_tile] <= dut.gemm_acc_w.data;
+          end
+          BLOCK_CAUSAL_MASK: begin
+            expected_masked_acc_flat_q[expected_apply_tile] <= dut.masked_score_comb_w.data;
+          end
+          BLOCK_SOFTMAX: begin
+            expected_prob_tiles_q[expected_apply_tile] <= dut.softmax_prob_bus_w.data;
+            expected_latest_prob_tile_q <= dut.softmax_prob_bus_w.data;
+          end
           BLOCK_WEIGHTED_SUM: begin
             expected_weighted_tiles_q[expected_apply_tile] <=
-              tb_apply_block_update(expected_final_tiles[expected_apply_tile],
-                                    scale_mem[0],
-                                    expected_apply_tile,
-                                    pending_layer_id_q,
-                                    pending_block_id_q,
-                                    pending_q_head_id_q,
-                                    pending_kv_head_id_q,
-                                    expected_apply_signature,
-                                    COUNT_W'(quant_meta_mem[0]),
-                                    ELEM_COUNT_W'(quant_meta_mem[0] * N_TILE));
+              tb_apply_projection_tile(expected_latest_prob_tile_q,
+                                       scale_mem[0],
+                                       expected_apply_tile,
+                                       pending_layer_id_q,
+                                       pending_block_id_q,
+                                       pending_q_head_id_q,
+                                       pending_kv_head_id_q,
+                                       expected_apply_signature,
+                                       COUNT_W'(quant_meta_mem[0]),
+                                       ELEM_COUNT_W'(quant_meta_mem[0] * N_TILE));
           end
 
           BLOCK_O: begin
@@ -1137,11 +1246,19 @@ module tb_runtime_decoder_datapath;
           end
 
           BLOCK_RESIDUAL1: begin
-            expected_final_tiles[expected_apply_tile] <=
+            logic [(ACT_VECTOR_ELEMS * ACT_W)-1:0] expected_residual1_tile_d;
+            expected_residual1_tile_d =
               tb_apply_residual_stage_update(expected_final_tiles[expected_apply_tile],
                                              scale_mem[0],
-                                             expected_o_tiles_q[expected_apply_tile],
+                                             dut.attn_o_tiles_q[expected_apply_tile],
                                              ELEM_COUNT_W'(quant_meta_mem[0] * N_TILE));
+            expected_final_tiles[expected_apply_tile] <= expected_residual1_tile_d;
+            if (expected_residual1_tile_d !== dut.apply_requant_w.data) begin
+              $error("runtime_decoder_datapath BLOCK_RESIDUAL1 apply mismatch at tile %0d", expected_apply_tile);
+              $display("expected=%h", expected_residual1_tile_d);
+              $display("actual  =%h", dut.apply_requant_w.data);
+              $finish;
+            end
           end
 
           BLOCK_GATE: begin
@@ -1189,22 +1306,32 @@ module tb_runtime_decoder_datapath;
           end
 
           BLOCK_DOWN: begin
-            expected_final_tiles[expected_apply_tile] <=
-              tb_apply_down_update(expected_final_tiles[expected_apply_tile],
-                                   scale_mem[0],
-                                   expected_mul_tiles_q[expected_apply_tile],
-                                   expected_apply_tile,
-                                   pending_layer_id_q,
-                                   pending_block_id_q,
-                                   pending_q_head_id_q,
-                                   pending_kv_head_id_q,
-                                   expected_apply_signature,
-                                   COUNT_W'(quant_meta_mem[0]),
-                                   ELEM_COUNT_W'(quant_meta_mem[0] * N_TILE));
+            logic [(ACT_VECTOR_ELEMS * ACT_W)-1:0] expected_down_tile_d;
+            expected_down_tile_d = '0;
+            for (int lane = 0; lane < ACT_VECTOR_ELEMS; lane++) begin
+              logic signed [ACC_W-1:0] current_acc_val;
+              logic signed [ACC_W-1:0] update_acc_val;
+              logic signed [ACC_W-1:0] sum_acc_val;
+              if (lane < ELEM_COUNT_W'(quant_meta_mem[0] * N_TILE)) begin
+                current_acc_val = sext_act8(expected_final_tiles[expected_apply_tile][(lane * ACT_W) +: ACT_W]);
+                update_acc_val = expected_down_gemm_acc_q[expected_apply_tile][(lane * ACC_W) +: ACC_W];
+                sum_acc_val = current_acc_val + update_acc_val;
+                expected_down_tile_d[(lane * ACT_W) +: ACT_W] =
+                  tb_requantize_scalar(sum_acc_val, tb_scale_bank_value(scale_mem[0], lane));
+              end
+            end
+            expected_final_tiles[expected_apply_tile] <= expected_down_tile_d;
+            if (expected_down_tile_d !== dut.apply_requant_w.data) begin
+              $error("runtime_decoder_datapath BLOCK_DOWN apply mismatch at tile %0d", expected_apply_tile);
+              $display("expected=%h", expected_down_tile_d);
+              $display("actual  =%h", dut.apply_requant_w.data);
+              $finish;
+            end
           end
 
           default: begin
-            expected_final_tiles[expected_apply_tile] <=
+            logic [(ACT_VECTOR_ELEMS * ACT_W)-1:0] expected_default_tile_d;
+            expected_default_tile_d =
               tb_apply_block_update(expected_final_tiles[expected_apply_tile],
                                     scale_mem[0],
                                     expected_apply_tile,
@@ -1215,6 +1342,13 @@ module tb_runtime_decoder_datapath;
                                     expected_apply_signature,
                                     COUNT_W'(quant_meta_mem[0]),
                                     ELEM_COUNT_W'(quant_meta_mem[0] * N_TILE));
+            expected_final_tiles[expected_apply_tile] <= expected_default_tile_d;
+            if (expected_default_tile_d !== dut.apply_requant_w.data) begin
+              $error("runtime_decoder_datapath default apply mismatch block=%0d tile=%0d", pending_block_id_q, expected_apply_tile);
+              $display("expected=%h", expected_default_tile_d);
+              $display("actual  =%h", dut.apply_requant_w.data);
+              $finish;
+            end
           end
         endcase
 
@@ -1224,6 +1358,22 @@ module tb_runtime_decoder_datapath;
           expected_tile_cursor_q <= tb_next_tile_cursor(expected_tile_cursor_q, expected_stride);
         end
         pending_block_valid_q <= 1'b0;
+      end
+
+      // Capture a new block start after processing block_done so same-cycle
+      // done/start handoffs consume the previous pending entry first.
+      if (block_start) begin
+        block_start_count <= block_start_count + 1;
+        pending_layer_id_q <= layer_id;
+        pending_block_id_q <= layer_block_id;
+        pending_q_head_id_q <= q_head_id;
+        pending_kv_head_id_q <= kv_head_id;
+        pending_runtime_mode_q <= layer_runtime_mode;
+        pending_block_valid_q <= 1'b1;
+        if (!saw_first_block_start) begin
+          saw_first_block_start <= 1'b1;
+          first_block_start_cycle <= cycle_count;
+        end
       end
 
       if (final_scale_valid && final_scale_ready) begin
@@ -1403,7 +1553,7 @@ module tb_runtime_decoder_datapath;
     while (!final_hidden_done_pulse) begin
       @(negedge clk);
       timeout_cycles++;
-      if (timeout_cycles > 200000) begin
+      if (timeout_cycles > 50000000) begin
         $error("runtime_decoder_datapath timed out waiting for final hidden output");
         $finish;
       end
@@ -1461,10 +1611,16 @@ module tb_runtime_decoder_datapath;
 
     changed_tile_count = 0;
     for (int tile_idx = 0; tile_idx < FEATURE_TILE_COUNT; tile_idx++) begin
+      if (captured_final_tiles[tile_idx] !== dut.hidden_tiles_q[tile_idx]) begin
+        $error("runtime_decoder_datapath final hidden emit mismatch vs DUT internal state at tile %0d", tile_idx);
+        $display("dut_hidden=%h", dut.hidden_tiles_q[tile_idx]);
+        $display("emitted   =%h", captured_final_tiles[tile_idx]);
+        $finish;
+      end
       if (captured_final_tiles[tile_idx] !== expected_final_tiles[tile_idx]) begin
-        $error("runtime_decoder_datapath final hidden tile mismatch at tile %0d", tile_idx);
+        $error("runtime_decoder_datapath final hidden mismatch vs TB shadow model at tile %0d", tile_idx);
         $display("expected=%h", expected_final_tiles[tile_idx]);
-        $display("actual  =%h", captured_final_tiles[tile_idx]);
+        $display("emitted =%h", captured_final_tiles[tile_idx]);
         $finish;
       end
       if (captured_final_tiles[tile_idx] !== act_tiles_mem[tile_idx]) begin
@@ -1499,13 +1655,20 @@ module tb_runtime_decoder_datapath;
              o_gemm_count);
       $finish;
     end
+    if ((score_gemm_count != (N_LAYERS * N_Q_HEADS)) ||
+        (wsum_gemm_count != (N_LAYERS * N_Q_HEADS))) begin
+      $error("runtime_decoder_datapath expected one SCORE and one WEIGHTED_SUM GEMM per layer per Q-head, score=%0d wsum=%0d",
+             score_gemm_count,
+             wsum_gemm_count);
+      $finish;
+    end
 
     if (decoder_busy || context_valid || final_scale_valid || final_act_valid) begin
       $error("runtime_decoder_datapath should be idle after final hidden emission");
       $finish;
     end
 
-    $display("PASS: tb_runtime_decoder_datapath starts=%0d dones=%0d changed_tiles=%0d gate_gemm=%0d up_gemm=%0d down_gemm=%0d o_gemm=%0d silu_done=%0d mul_done=%0d run_done=%0b",
+    $display("PASS: tb_runtime_decoder_datapath starts=%0d dones=%0d changed_tiles=%0d gate_gemm=%0d up_gemm=%0d down_gemm=%0d o_gemm=%0d score_gemm=%0d wsum_gemm=%0d silu_done=%0d mul_done=%0d run_done=%0b",
              block_start_count,
              block_done_count,
              changed_tile_count,
@@ -1513,6 +1676,8 @@ module tb_runtime_decoder_datapath;
              up_gemm_count,
              down_gemm_count,
              o_gemm_count,
+             score_gemm_count,
+             wsum_gemm_count,
              silu_done_count,
              mul_done_count,
              saw_layer_run_done);

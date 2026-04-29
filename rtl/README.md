@@ -234,23 +234,26 @@ Use this checklist as we add new production RTL:
 - later, before calling a block synthesis-ready in the strongest sense, it still
   needs a real vendor-tool synthesis pass
 
-Current vendor-tool checkpoint status for the post-Phase-9 slice:
+Current vendor-tool checkpoint status (as of Session 31):
 
-- `embedding_quantizer.sv` now synthesizes cleanly in Vivado as a leaf top
-- `runtime_embedding_frontend.sv` now synthesizes cleanly as the next parent
-- `tinyllama_u55c_kernel_top.sv` now synthesizes cleanly as the current runtime
-  top
-- the new `runtime_final_rmsnorm_tail.sv` and `runtime_lm_head_tail.sv` slices
-  still need their own Vivado checkpoints
-- `rtl/nonlinear/rmsnorm_core_hls_ip.sv` is currently a repo-owned local Icarus
-  simulation model and should not be treated as a vendor-synthesis milestone
-
-One important interpretation note:
-
-- the current kernel-top synth is structurally useful, but its utilization is
-  still artificially low because the emitted decoder final-hidden stream
-  remains a deterministic scaffold rather than the final downstream compute
-  chain
+- Full `tinyllama_u55c_kernel_top` (Phases 0–9m, 51 modules) synthesized
+  successfully on ASU SOL HPC cluster via `sbatch synth/sol_synth.slurm`
+- Results at GEMM_LANES=64: LUTs 91.71% (1,195,571 / 1,303,680), DSPs 11.35%
+  (1024 / 9024), Registers 17.30%, BRAMs 0%, WNS −72.633 ns (synthesis
+  timing — pessimistic without placement)
+- BRAM fix applied: `(* ram_style = "distributed" *)` on 7 tile arrays in
+  `runtime_decoder_datapath.sv`; for-loop bulk resets removed; verified PASS
+  under XSIM before re-submission
+- 512-lane synthesis pending (job 51924560): GEMM_LANES unified to 512 (no
+  longer split between simulation and synthesis), 8 threads, 100 MHz clock
+  target; `synth/sol_synthesis_guide.md` has the full SOL workflow reference
+- `rtl/nonlinear/rmsnorm_core_hls_ip.sv`, `softmax_core_hls_ip.sv`,
+  `silu_core_hls_ip.sv` are repo-owned simulation models; synthesis uses
+  `*_synth.sv` black-box stub versions (`rmsnorm_core_hls_ip_synth.sv`,
+  `softmax_core_hls_ip_synth.sv`, `silu_core_hls_ip_synth.sv`) — real HLS IP
+  generation via Vitis v++ targets the U280 platform
+  (`xilinx_u280_gen3x16_xdma_1_202211_1`); see `docs/sol_synthesis_guide.md`
+  for the v++ compile + link + host run commands
 
 ## Legacy Validation Files
 

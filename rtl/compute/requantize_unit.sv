@@ -2,7 +2,7 @@ import tinyllama_pkg::*;
 import tinyllama_bus_pkg::*;
 
 module requantize_unit (
-  input  acc_bus_t acc_i,
+  input  acc_bus_t  acc_i,
   input  scale_bus_t scale_i,
   input  logic      nonnegative_only_i,
   output act_bus_t  act_o

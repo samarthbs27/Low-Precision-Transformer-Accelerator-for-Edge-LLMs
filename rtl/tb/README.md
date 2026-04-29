@@ -581,9 +581,10 @@ python model/export_fpga_vectors.py --phase phase5 --layer 0 --output-dir sim/go
 Then run:
 
 ```powershell
-iverilog -g2012 -o sim/tb_softmax_wrapper.vvp `
+iverilog -g2012 -DNO_FAST_SOFTMAX -o sim/tb_softmax_wrapper.vvp `
   rtl/common/tinyllama_pkg.sv `
   rtl/common/tinyllama_bus_pkg.sv `
+  rtl/nonlinear/softmax_core_hls_ip.sv `
   rtl/nonlinear/softmax_wrapper.sv `
   rtl/tb/tb_softmax_wrapper.sv
 vvp sim/tb_softmax_wrapper.vvp
@@ -699,18 +700,36 @@ PASS: tb_runtime_embedding_frontend
 
 ### `tb_runtime_decoder_datapath.sv`
 
-Before running this bench, regenerate the Phase 6 fixtures:
+**Recommended — use the canonical run script** (handles XSIM elaboration, fixture staging, and PASS verification automatically):
+
+```powershell
+.\sim\run_tb_runtime_decoder_datapath.ps1
+```
+
+For full softmax mode (slower, ~same sim time):
+
+```powershell
+.\sim\run_tb_runtime_decoder_datapath.ps1 -FullSoftmax
+```
+
+Before running, regenerate Phase 6 fixtures if not present:
 
 ```powershell
 python model/export_fpga_vectors.py --phase phase6 --layer 0 --output-dir sim/golden_traces
 ```
 
-Then run:
+Legacy iverilog invocation (fast softmax only, no XSIM):
 
 ```powershell
 iverilog -g2012 -o sim/tb_runtime_decoder_datapath.vvp `
   rtl/common/tinyllama_pkg.sv `
   rtl/common/tinyllama_bus_pkg.sv `
+  rtl/compute/mac_lane.sv `
+  rtl/compute/accumulator_bank.sv `
+  rtl/compute/shared_gemm_engine.sv `
+  rtl/compute/causal_mask_unit.sv `
+  rtl/nonlinear/softmax_core_hls_ip.sv `
+  rtl/nonlinear/softmax_wrapper.sv `
   rtl/control/layer_controller.sv `
   rtl/compute/residual_add.sv `
   rtl/compute/requantize_unit.sv `
@@ -724,7 +743,7 @@ vvp sim/tb_runtime_decoder_datapath.vvp
 
 Expected pass string:
 ```text
-PASS: tb_runtime_decoder_datapath
+PASS: tb_runtime_decoder_datapath starts=3212 dones=3212 changed_tiles=62 ... run_done=1
 ```
 
 ### `tb_runtime_final_rmsnorm_tail.sv`
